@@ -1,0 +1,34 @@
+role: supervisor
+family: claude
+provider_id: slp-supervisor
+label: "SLP Supervisor"
+description: "SLP boss: discovery + workstreams, no write, no bash, orchestration-only Paseo tools"
+write: none          # none | slp-only | all
+bash: none           # none | allowlist | readonly | all-except
+bash_allow: []
+bash_deny: []
+protected_branches: []
+paseo_tools:
+  enabled: true
+  disabled:
+    - create_terminal
+    - kill_terminal
+    - capture_terminal
+    - send_terminal_keys
+    - list_terminals
+    - start_workspace_script
+    - stop_workspace_script
+    - create_schedule
+    - create_heartbeat
+    - delete_heartbeat
+    - update_schedule
+    - delete_schedule
+    - pause_schedule
+    - resume_schedule
+    - run_schedule_once
+    - respond_to_permission
+    - kill_agent
+    - "browser_*"   # expanded by slp-build to every browser_* tool
+skills_auto: [paseo, be-research, slp-supervisor]
+deny_tools: []       # whole-tool denies in addition to those implied by write/bash
+probe: {model: claude-haiku-5-5, mode: bypassPermissions}

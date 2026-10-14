@@ -1,0 +1,10 @@
+{
+  "slice_id": "s1-export-service",
+  "status": "done",
+  "files_changed": ["src/campaign/export/exporter.py", "tests/campaign/test_export.py"],
+  "tests": {"cmd": "python -m pytest -q tests/campaign/test_export.py", "passed": 4, "failed": 0},
+  "deviations": [],
+  "questions": [],
+  "hard_gates": [],
+  "summary": "Added CampaignExporter.to_csv with paging.\nAll four new tests pass."
+}

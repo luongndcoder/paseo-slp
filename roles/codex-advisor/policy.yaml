@@ -1,0 +1,13 @@
+role: codex-advisor
+family: codex
+provider_id: slp-codex-advisor
+label: "SLP Codex Advisor"
+description: "SLP peer advisor (Codex): sandbox read-only + approval never via -c; no Paseo tools"
+write: none          # enforced by codex sandbox_mode=read-only (-c); do NOT set a modeId on the profile
+bash: none
+bash_allow: []
+bash_deny: []
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: []
+probe: {model: auto-cheapest, mode: null}

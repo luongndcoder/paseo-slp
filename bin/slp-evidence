@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""slp-evidence: drop review findings that are not backed by the code.
+
+  slp-evidence <review.json> <worktree> [--brief PATH] [--base REF]
+
+For every finding: `file` must be in the diff (base...HEAD + uncommitted/untracked) or listed in
+brief.files; `line` must exist in the file at HEAD (working tree for files with uncommitted
+changes); `evidence` (whitespace-normalised) must appear within +-3 lines of `line`.
+`--base REF` sets the diff base when there is no brief (use the base branch for final-review.json);
+default base: the brief's base_ref, else HEAD (uncommitted changes only).
+Writes <review>.checked.json (same shape; failing findings move to `rejected[]` with a reason).
+Exit 0 on success, 2 on usage/input error.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+_VENV_PY = Path.home() / ".claude" / "skills" / ".venv" / "bin" / "python3"
+if __name__ == "__main__" and _VENV_PY.is_file() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import slp_git  # noqa: E402
+from slp_schema import ArtifactError, load_front_matter, load_json, schema_errors  # noqa: E402
+
+WINDOW = 3
+MIN_EVIDENCE_CHARS = 4
+
+
+def norm(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def file_text(worktree: Path, path: str, dirty: set[str]) -> str | None:
+    """Content at HEAD; for files with uncommitted changes fall back to the working tree."""
+    head = slp_git.show(worktree, "HEAD", path)
+    if head is not None and path not in dirty:
+        return head
+    wt = worktree / path
+    if path in dirty and wt.is_file():
+        try:
+            return wt.read_text(errors="replace")
+        except OSError:
+            return head
+    return head
+
+
+def judge(
+    finding: dict[str, Any], worktree: Path, allowed: set[str], dirty: set[str]
+) -> str | None:
+    """Return a rejection reason, or None if the finding is backed by the code."""
+    path = finding["file"]
+    if path not in allowed:
+        return "file is not in the diff or in brief.files"
+    text = file_text(worktree, path, dirty)
+    if text is None:
+        return f"file {path} does not exist at HEAD"
+    lines = text.splitlines()
+    line = finding["line"]
+    if line < 1 or line > len(lines):
+        return f"line {line} does not exist (file has {len(lines)} lines)"
+    wanted = norm(finding["evidence"])
+    if len(wanted) < MIN_EVIDENCE_CHARS:
+        return "evidence missing or too short"
+    window = " ".join(lines[max(0, line - 1 - WINDOW) : line + WINDOW])
+    if wanted not in norm(window):
+        return f"evidence not found within +-{WINDOW} lines of {path}:{line}"
+    return None
+
+
+def run(args: argparse.Namespace) -> int:
+    review_path = Path(args.review).resolve()
+    worktree = Path(args.worktree).resolve()
+    if not worktree.is_dir():
+        raise ArtifactError(f"worktree {worktree} is not a directory")
+    review = load_json(review_path)
+    errors = schema_errors(review, "review")
+    if errors:
+        raise ArtifactError(f"{review_path} violates review schema: " + "; ".join(errors))
+
+    brief_path = Path(args.brief) if args.brief else None
+    if brief_path is None:
+        cand = worktree / ".slp" / "slices" / review["slice_id"] / "brief.md"
+        brief_path = cand if cand.is_file() else None
+    brief_files: set[str] = set()
+    base_ref = args.base or "HEAD"
+    if brief_path is not None:
+        brief, _ = load_front_matter(brief_path, "brief")
+        brief_files = set(brief["files"])
+        base_ref = args.base or brief["base_ref"]
+
+    try:
+        slp_git.git(worktree, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
+        changed = set(slp_git.changed_files(worktree, base_ref))
+        dirty = set(slp_git.changed_files(worktree, "HEAD"))
+    except slp_git.GitError as exc:
+        raise ArtifactError(str(exc)) from exc
+
+    allowed = changed | brief_files
+    kept: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = list(review.get("rejected") or [])
+    for finding in review["findings"]:
+        reason = judge(finding, worktree, allowed, dirty)
+        if reason is None:
+            kept.append(finding)
+        else:
+            rejected.append({"finding": finding, "reason": reason})
+    checked = {**review, "findings": kept, "rejected": rejected}
+    out = review_path.with_name(re.sub(r"\.json$", "", review_path.name) + ".checked.json")
+    out.write_text(json.dumps(checked, indent=2, ensure_ascii=False) + "\n")
+    print(
+        f"slp-evidence: kept {len(kept)}, rejected {len(rejected)} "
+        f"(verdict={review['verdict']}) -> {out}"
+    )
+    for item in rejected:
+        f = item["finding"]
+        print(f"  rejected {f.get('file')}:{f.get('line')}  {item['reason']}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("review")
+    ap.add_argument("worktree")
+    ap.add_argument("--brief", help="brief.md path (default .slp/slices/<slice_id>/brief.md)")
+    ap.add_argument("--base", help="diff base ref when there is no brief (e.g. the base branch)")
+    try:
+        args = ap.parse_args()
+    except SystemExit as exc:
+        return 2 if exc.code else 0
+    try:
+        return run(args)
+    except (ArtifactError, slp_git.GitError) as exc:
+        print(f"slp-evidence: error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"slp-evidence: internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

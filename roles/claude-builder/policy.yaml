@@ -1,0 +1,18 @@
+role: claude-builder
+family: claude
+provider_id: slp-claude-builder
+label: "SLP Claude Builder"
+description: "SLP peer builder (Claude): writes code inside its slice; no push, no hard reset, no sub-agents, no Paseo tools"
+write: all
+bash: all-except
+bash_allow: []
+bash_deny:           # regexes over the normalized segment "<cmd> <args>" (git global options stripped)
+  - '^git push(\s|$)'
+  - '^git reset\b.*\s--hard(\s|$)'
+  - '^git branch\b.*\s(-d|-D|--delete)(\s|$)'
+  - '^rm\b(?=.*\s-\S*[rR])(?=.*\s(/|/\*|~|~/\*?|\$HOME|\$HOME/\*?)(\s|$))'
+protected_branches: [test, master, develop]   # git merge/rebase/pull/checkout/switch of these denied
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: [be-git, be-api-docs-sync]
+deny_tools: [Agent, Task, NotebookEdit]
+probe: {model: claude-haiku-5-5, mode: bypassPermissions}

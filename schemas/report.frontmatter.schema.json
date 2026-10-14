@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slp.local/schemas/report.frontmatter.schema.json",
+  "title": "SLP report.md front-matter (Lead -> Supervisor)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status", "slices", "acceptance", "open_questions", "hard_gates_hit", "deferred_minor",
+    "metrics"
+  ],
+  "properties": {
+    "status": {"enum": ["done", "blocked", "needs_input"]},
+    "slices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "rounds"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "verdict": {"enum": ["pass", "fix", "block"]},
+          "rounds": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "acceptance": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item", "done"],
+        "properties": {"item": {"type": "string", "minLength": 1}, "done": {"type": "boolean"}}
+      }
+    },
+    "open_questions": {"type": "array", "items": {"type": "string"}},
+    "hard_gates_hit": {"type": "array", "items": {"type": "string"}},
+    "deferred_minor": {"type": "array", "items": {"type": "string"}},
+    "metrics": {
+      "type": "object",
+      "description": "Free-form per-role metrics (SLP-SPEC 7b): tokens, rounds, verify failures, ..."
+    }
+  }
+}

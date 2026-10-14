@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""slp-build: generate per-role harness from roles/<role>/{role.md,policy.yaml}.
+
+Default is a dry run (writes build/ and prints the providers JSON + a diff vs the live config).
+--apply additionally writes ONLY the agents.providers.slp-* keys of ~/.paseo/config.json
+and runs `paseo reload`.
+"""
+from __future__ import annotations
+
+import argparse
+import difflib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+_VENV_PY = Path.home() / ".claude" / "skills" / ".venv" / "bin" / "python3"
+if __name__ == "__main__" and _VENV_PY.is_file() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+import yaml  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import slp_paseo  # noqa: E402
+import slp_policy  # noqa: E402
+import slp_skills_install  # noqa: E402
+ROLES_DIR = ROOT / "roles"
+BUILD_DIR = ROOT / "build"
+GUARD = ROOT / "hooks" / "slp-guard.py"
+PY = str(_VENV_PY) if _VENV_PY.is_file() else sys.executable
+SKILLS_DIR = Path.home() / ".claude" / "skills"
+CONFIG = Path.home() / ".paseo" / "config.json"
+# One rolling copy of the config as it was right before the last --apply (rollback aid).
+# Lives in build/ (gitignored) and is overwritten each time, so nothing piles up in /tmp.
+CONFIG_BACKUP = ROOT / "build" / "config-before-apply.json"
+SETTINGS = Path.home() / ".claude" / "settings.json"
+SKILLS_SRC = ROOT / "skills"
+PREFIX = "slp-"
+MAX_ROLE_LINES = 60
+
+BROWSER_TOOLS = [
+    "back", "click", "close_tab", "drag", "evaluate", "fill", "forward", "hover", "keypress",
+    "list_tabs", "logs", "navigate", "new_tab", "reload", "resize", "screenshot", "scroll",
+    "select", "snapshot", "type", "upload", "wait",
+]  # fmt: skip
+# Bundled/plugin skills that do not live in ~/.claude/skills; extend roles/extra_skills.yaml
+# when conformance shows more leaking.
+EXTRA_SKILLS: list[str] = yaml.safe_load((ROLES_DIR / "extra_skills.yaml").read_text()) or []
+
+
+# ---------------------------------------------------------------- loading
+def load_roles() -> dict[str, dict[str, Any]]:
+    roles: dict[str, dict[str, Any]] = {}
+    for pol in sorted(ROLES_DIR.glob("*/policy.yaml")):
+        policy = yaml.safe_load(pol.read_text())
+        role_md = (pol.parent / "role.md").read_text().replace("<SLP_ROOT>", str(ROOT))
+        first = role_md.splitlines()[0]
+        if first != f"ROLE-MARKER: {PREFIX}{policy['role']}":
+            sys.exit(f"{pol.parent}/role.md: bad first line {first!r}")
+        if len(role_md.splitlines()) > MAX_ROLE_LINES:
+            sys.exit(f"{pol.parent}/role.md: more than {MAX_ROLE_LINES} lines")
+        if policy["role"] != pol.parent.name:
+            sys.exit(f"{pol}: role does not match directory")
+        policy["_role_md"] = role_md.rstrip("\n") + "\n"
+        policy["_role_md_path"] = str(pol.parent / "role.md")
+        roles[policy["role"]] = policy
+    return roles
+
+
+def all_skill_names() -> list[str]:
+    names: set[str] = set(EXTRA_SKILLS) | set(slp_skills_install.source_skills(SKILLS_SRC))
+    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        name = skill_md.parent.name
+        text = skill_md.read_text(errors="replace")
+        m = re.match(r"---\s*\n(.*?)\n---", text, re.S)
+        if m:
+            try:
+                fm = yaml.safe_load(m.group(1)) or {}
+                if isinstance(fm, dict) and fm.get("name"):
+                    name = str(fm["name"])
+            except yaml.YAMLError:
+                pass
+        names.add(name)
+    return sorted(names)
+
+
+def expand_disabled(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item == "browser_*":
+            out += [f"browser_{t}" for t in BROWSER_TOOLS]
+        else:
+            out.append(item)
+    return out
+
+
+def paseo_tools(policy: dict[str, Any]) -> dict[str, Any]:
+    pt = policy["paseo_tools"]
+    if not pt.get("enabled", False):
+        return {"enabled": False}
+    return {"enabled": True, "disabledTools": expand_disabled(pt.get("disabled", []))}
+
+
+# ---------------------------------------------------------------- claude
+def claude_artifacts(policy: dict[str, Any], skills: list[str]) -> tuple[dict, dict, dict]:
+    role = policy["role"]
+    guard_cmd = f"{PY} {GUARD} --role {role}"
+    # WHY: a missing interpreter or syntax error exits 1, which Claude treats as non-blocking;
+    # `|| exit 2` makes the PreToolUse guard fail closed.
+    pre_cmd = f"{guard_cmd} || exit 2"
+    deny = list(policy.get("deny_tools", []))
+    if policy["write"] == "none":
+        deny += ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+    if policy["bash"] == "none":
+        deny.append("Bash")
+    deny = sorted(set(deny))
+
+    pre: list[dict[str, Any]] = []
+    if policy["bash"] != "none":
+        pre.append(
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": pre_cmd, "timeout": 20}]}
+        )
+    if policy["write"] == "slp-only":
+        pre.append(
+            {
+                "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "command": pre_cmd, "timeout": 20}],
+            }
+        )
+    hooks: dict[str, Any] = {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": f"{guard_cmd} --session-start"}]}
+        ]
+    }
+    if pre:
+        hooks["PreToolUse"] = pre
+
+    allowed = set(policy.get("skills_auto", []))
+    # WHY explicit "on": ~/.claude/settings.json sets slp-supervisor/slp-lead to user-invocable-only globally,
+    # so a role's auto skills must be switched on here or they would stay hidden.
+    overrides = {s: "off" for s in skills if s not in allowed}
+    overrides.update({s: "on" for s in sorted(allowed)})
+    settings = {
+        "skillOverrides": overrides,
+        "permissions": {"deny": deny},
+        "hooks": hooks,
+    }
+    guard_policy = slp_policy.guard_policy(policy)
+    settings_path = BUILD_DIR / "claude" / f"{role}.settings.json"
+    provider = {
+        "extends": "claude",
+        "label": policy["label"],
+        "description": policy["description"],
+        "command": [
+            "claude",
+            "--settings",
+            str(settings_path),
+            "--append-system-prompt",
+            policy["_role_md"],
+        ],
+        "paseoTools": paseo_tools(policy),
+    }
+    return settings, guard_policy, provider
+
+
+# ---------------------------------------------------------------- codex
+def toml_basic_string(text: str) -> str:
+    esc = text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
+    return f'"{esc}"'
+
+
+def codex_catalog_no_multi_agent() -> Path:
+    """build/codex/catalog.json = `codex debug models` with multi_agent_version/_reasoning_effort stripped.
+
+    WHY: the per-model catalog field `multi_agent_version: v2` (gpt-6-*, gpt-5.6-sol/terra) injects the
+    collaboration.spawn_agent tools + <multi_agent_role> prompt regardless of `features.multi_agent*`
+    (verified with `codex debug prompt-input`). With the field absent the legacy `features.multi_agent`
+    flag decides again, so `-c features.multi_agent=false` works. Regenerated on every build so new
+    models are not lost; falls back to the bundled catalog when the refresh fails.
+    """
+    out = BUILD_DIR / "codex" / "catalog.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for extra in ([], ["--bundled"]):
+        res = subprocess.run(["codex", "debug", "models", *extra], capture_output=True, text=True, timeout=90)
+        try:
+            data = json.loads(res.stdout)
+            models = data["models"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        for m in models:
+            m.pop("multi_agent_version", None)
+            m.pop("multi_agent_reasoning_effort", None)
+        out.write_text(json.dumps(data))
+        return out
+    sys.exit("codex debug models failed; cannot build the no-multi-agent catalog")
+
+
+def codex_provider(policy: dict[str, Any]) -> dict[str, Any]:
+    catalog = codex_catalog_no_multi_agent()
+    # Paseo sends its own developerInstructions on thread/start, which overrides the
+    # developer_instructions config key; model_instructions_file replaces the base
+    # instructions instead and is not touched by Paseo.
+    return {
+        "extends": "codex",
+        "label": policy["label"],
+        "description": policy["description"],
+        "command": [
+            "codex",
+            "-c",
+            'sandbox_mode="read-only"',
+            "-c",
+            'approval_policy="never"',
+            # WHY: peers must not fan out. `features.multi_agent` (stable, default on; ~/.codex/config.toml
+            # sets it true) is the flag behind spawn_agent/send_message/wait/...; `-c` beats the user config.
+            "-c",
+            "features.multi_agent=false",
+            "-c",
+            "features.multi_agent_v2=false",
+            "-c",
+            f"model_catalog_json={toml_basic_string(str(catalog))}",
+            "-c",
+            f"developer_instructions={toml_basic_string(policy['_role_md'])}",
+            "-c",
+            f"model_instructions_file={toml_basic_string(policy['_role_md_path'])}",
+        ],
+        "paseoTools": paseo_tools(policy),
+    }
+
+
+# ---------------------------------------------------------------- opencode
+def opencode_provider(policy: dict[str, Any]) -> dict[str, Any]:
+    # WHY: Paseo 0.11.2 runs ONE shared `opencode serve` and ignores per-provider
+    # OPENCODE_CONFIG_CONTENT for mode discovery, so the agent is installed globally as
+    # ~/.config/opencode/agents/<agent_name>.md (on --apply) and selected via profile modeId.
+    bash_rules: dict[str, str] = {"*": "allow"}
+    for pat in policy.get("bash_deny", []):  # last matching rule wins in OpenCode
+        bash_rules[pat] = "deny"
+    front = {
+        "description": policy["description"],
+        "mode": "primary",
+        "steps": int(policy.get("steps", 80)),
+        "permission": {
+            "edit": "allow" if policy["write"] == "all" else "deny",
+            "bash": bash_rules,
+            "task": "deny",
+            "webfetch": "deny",
+        },
+    }
+    body = (
+        "---\n"
+        + yaml.safe_dump(front, sort_keys=False, allow_unicode=True)
+        + "---\n\n<!-- GENERATED by paseo-slp/bin/slp-build from roles/"
+        + policy["role"]
+        + " — do not edit -->\n\n"
+        + policy["_role_md"]
+    )
+    out = BUILD_DIR / "opencode" / f"{policy['agent_name']}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(body)
+    return {
+        "extends": "opencode",
+        "label": policy["label"],
+        "description": policy["description"],
+        "paseoTools": paseo_tools(policy),
+    }
+
+
+# ---------------------------------------------------------------- pi
+def pi_provider(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "extends": "pi",
+        "label": policy["label"],
+        "description": policy["description"],
+        "command": ["pi", "--append-system-prompt", policy["_role_md_path"]],
+        "paseoTools": paseo_tools(policy),
+    }
+
+
+# ---------------------------------------------------------------- antigravity
+AGY_AGENTS_DIR = Path.home() / ".gemini" / "config" / "agents"
+# WHY: Paseo cannot derive a slp-* provider from the antigravity plugin provider (`extends: "antigravity"` is a
+# fatal config error), so the only way to put the SLP agent in front of Antigravity agents is to override the
+# built-in plugin provider key itself (an entry without `extends` is an override; verified on a throw-away
+# 0.11.2 daemon: spawned argv = `agy --agent slp-agy-builder <paseo flags>`). Accepted by the coordinator:
+# EVERY Antigravity agent started via Paseo becomes the SLP builder. This is the ONLY non-slp key slp-build
+# writes, and only its command / paseoTools / label fields are merged (anything else under the key is kept).
+PLAIN_OVERRIDE_KEYS = {"antigravity"}
+OVERRIDE_FIELDS = ("command", "paseoTools", "label")
+
+
+def antigravity_agent(policy: dict[str, Any]) -> Path:
+    """Generate build/antigravity/<agent_name>.md (frontmatter name/description/tools + role.md body)."""
+    name = policy["agent_name"]
+    if not (name.startswith(PREFIX) and re.fullmatch(r"[a-z0-9-]+", name)):
+        sys.exit(f"{policy['role']}: agent_name must match slp-[a-z0-9-]+")
+    tools = list(policy["agy_tools"])
+    if not tools:
+        sys.exit(f"{policy['role']}: agy_tools must not be empty")
+    front = {"name": name, "description": policy["description"], "tools": tools}
+    body = (
+        "---\n"
+        + yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=10_000)
+        + "---\n\n<!-- GENERATED by paseo-slp/bin/slp-build from roles/"
+        + policy["role"]
+        + " - do not edit -->\n\n"
+        + policy["_role_md"]
+    )
+    out = BUILD_DIR / "antigravity" / f"{name}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(body)
+    return out
+
+
+def install_antigravity() -> None:
+    """Copy build/antigravity/slp-*.md to ~/.gemini/config/agents/ and check `agy agents` lists them."""
+    built = sorted((BUILD_DIR / "antigravity").glob("slp-*.md"))
+    for md in built:
+        AGY_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(md, AGY_AGENTS_DIR / md.name)  # only slp-*.md; other agent files are never touched
+        print(f"antigravity agent installed: {AGY_AGENTS_DIR / md.name}")
+    if not built:
+        return
+    res = subprocess.run(["agy", "agents"], capture_output=True, text=True)
+    listed = set((res.stdout + res.stderr).split())
+    for md in built:
+        ok = md.stem in listed
+        print(f"agy agents lists {md.stem}: {ok}")
+        if not ok:  # a frontmatter parse error makes agy skip the file silently
+            print(f"ERROR: {md.stem} missing from `agy agents`; check the frontmatter", file=sys.stderr)
+            sys.exit(1)
+
+
+# ---------------------------------------------------------------- main
+def generate() -> dict[str, dict[str, Any]]:
+    roles = load_roles()
+    skills = all_skill_names()
+    providers: dict[str, dict[str, Any]] = {}
+    (BUILD_DIR / "claude").mkdir(parents=True, exist_ok=True)
+    for role, policy in roles.items():
+        fam = policy["family"]
+        if fam == "claude":
+            settings, guard_policy, provider = claude_artifacts(policy, skills)
+            (BUILD_DIR / "claude" / f"{role}.settings.json").write_text(
+                json.dumps(settings, indent=2) + "\n"
+            )
+            (BUILD_DIR / "claude" / f"{role}.policy.json").write_text(
+                json.dumps(guard_policy, indent=2) + "\n"
+            )
+        elif fam == "codex":
+            provider = codex_provider(policy)
+        elif fam == "opencode":
+            provider = opencode_provider(policy)
+        elif fam == "pi":
+            provider = pi_provider(policy)
+        elif fam == "antigravity":
+            antigravity_agent(policy)
+            provider = {
+                "command": ["agy", "--agent", policy["agent_name"]],
+                "paseoTools": paseo_tools(policy),
+            }
+            if policy.get("override_label"):
+                provider["label"] = policy["override_label"]
+        else:
+            sys.exit(f"{role}: unsupported family {fam}")
+        pid = policy["provider_id"]
+        if not (pid.startswith(PREFIX) or (fam == "antigravity" and pid in PLAIN_OVERRIDE_KEYS)):
+            sys.exit(f"{role}: provider_id must start with {PREFIX}")
+        providers[pid] = provider
+    (BUILD_DIR / "providers.json").write_text(json.dumps(providers, indent=2) + "\n")
+    return providers
+
+
+def dump_config(cfg: dict[str, Any]) -> str:
+    return json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+
+
+def merged_config(providers: dict[str, dict[str, Any]]) -> tuple[str, str, list[str]]:
+    current_text = CONFIG.read_text()
+    cfg = json.loads(current_text)
+    live = cfg.setdefault("agents", {}).setdefault("providers", {})
+    stale = [k for k in live if k.startswith(PREFIX) and k not in providers]
+    for key, value in providers.items():
+        if key in PLAIN_OVERRIDE_KEYS:  # merge only the owned fields of the built-in override
+            entry = live.setdefault(key, {})
+            entry.update({f: value[f] for f in OVERRIDE_FIELDS if f in value})
+        else:
+            live[key] = value  # slp-* keys are replaced wholesale
+    return current_text, dump_config(cfg), stale
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--apply", action="store_true", help="write slp-* providers + paseo reload")
+    ap.add_argument("--quiet", action="store_true", help="do not print providers JSON")
+    args = ap.parse_args()
+
+    providers = generate()
+    current, new, stale = merged_config(providers)
+    if not args.quiet:
+        print(json.dumps(providers, indent=2, ensure_ascii=False))
+    diff = "".join(
+        difflib.unified_diff(
+            current.splitlines(True), new.splitlines(True), "config.json (current)", "config.json (new)", n=1
+        )
+    )
+    print("\n=== diff vs current ~/.paseo/config.json ===")
+    print(diff or "(no changes)")
+    if stale:
+        print(f"note: stale slp-* providers left untouched: {stale}")
+    print("\n=== skills (~/.claude/skills symlinks + ~/.claude/settings.json) ===")
+    print("\n".join(slp_skills_install.install_symlinks(SKILLS_SRC, SKILLS_DIR, apply=False)) or "(no slp-* skills)")
+    sdiff, schanged = slp_skills_install.ensure_overrides(SETTINGS, apply=False)
+    print(sdiff or "(settings.json: no changes)")
+    if not args.apply:
+        print("dry run: pass --apply to write the config, install skills and reload Paseo")
+        return
+    oc_dir = Path.home() / ".config" / "opencode" / "agents"
+    for md in sorted((BUILD_DIR / "opencode").glob("slp-*.md")):
+        oc_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(md, oc_dir / md.name)
+        print(f"opencode agent installed: {oc_dir / md.name}")
+    install_antigravity()
+    for line in slp_skills_install.install_symlinks(SKILLS_SRC, SKILLS_DIR, apply=True):
+        print(line)
+    sdiff, schanged = slp_skills_install.ensure_overrides(SETTINGS, apply=True)
+    print(f"settings.json skillOverrides {'updated' if schanged else 'already set'}: {SETTINGS}")
+    if diff:  # only back up when something changes, so an idempotent re-apply never clobbers the real "before" copy
+        CONFIG_BACKUP.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(CONFIG, CONFIG_BACKUP)
+        print(f"backup: {CONFIG_BACKUP}")
+        # re-read right before writing to minimise clobbering concurrent edits (zerosub rotation)
+        current, new, _ = merged_config(providers)
+        CONFIG.write_text(new)
+        print(f"wrote {CONFIG}")
+    subprocess.run([slp_paseo.resolve_cli(), "reload"], check=False)
+
+
+if __name__ == "__main__":
+    main()

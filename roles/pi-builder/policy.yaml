@@ -1,0 +1,13 @@
+role: pi-builder
+family: pi
+provider_id: slp-pi-builder
+label: "SLP Pi Builder"
+description: "SLP peer builder (Pi): role prompt via --append-system-prompt; no Paseo tools; Pi has no native permission layer (slp-verify is the net)"
+write: all
+bash: all   # default Pi tools; no harness-level restriction available
+bash_allow: []
+bash_deny: []
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: []
+probe: {model: "openai-api/gemini-3.8-flash-high", mode: null}

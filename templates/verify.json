@@ -1,0 +1,19 @@
+{
+  "slice_id": "s1-export-service",
+  "round": 1,
+  "verdict": "pass",
+  "base_ref": "develop",
+  "repo": {"name": "example-repo", "config": "/path/to/repos/example-repo.yaml"},
+  "changed_files": ["src/campaign/export/exporter.py", "tests/campaign/test_export.py"],
+  "generated_at": "2026-10-14T10:00:00+00:00",
+  "checks": [
+    {"name": "test", "status": "pass", "evidence": ["$ python -m pytest -q -> exit 0 in 2.1s"]},
+    {"name": "lint", "status": "pass", "evidence": ["$ ruff check . -> exit 0 in 0.4s"]},
+    {"name": "typecheck", "status": "skipped", "evidence": ["skipped by repo config: none"]},
+    {"name": "scope", "status": "pass", "evidence": ["2 changed file(s) within brief.files"]},
+    {"name": "writer_conflict", "status": "pass", "evidence": ["no overlap"]},
+    {"name": "hard_gate", "status": "pass", "evidence": ["no match"]},
+    {"name": "sandbox_escape", "status": "pass", "evidence": ["no match"]},
+    {"name": "contract", "status": "pass", "evidence": ["result.json valid (status=done)"]}
+  ]
+}

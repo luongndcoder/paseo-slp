@@ -1,0 +1,16 @@
+# Skills that do NOT live in ~/.claude/skills (Claude Code bundled skills seen leaking in conformance).
+# slp-build switches them off ("off") in every Claude role unless listed in that role's skills_auto.
+- claude-api
+- code-review
+- dataviz
+- fewer-permission-prompts
+- init
+- keybindings-help
+- loop
+- plugin-authoring
+- run
+- schedule
+- security-review
+- simplify
+- update-config
+- workflow-authoring

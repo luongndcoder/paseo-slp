@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slp.local/schemas/review.schema.json",
+  "title": "SLP review (Checker -> Lead); also final-review.json and *.checked.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["slice_id", "round", "verdict", "findings"],
+  "properties": {
+    "slice_id": {"type": "string", "minLength": 1},
+    "round": {"type": "integer", "minimum": 1},
+    "verdict": {"enum": ["pass", "fix", "block"]},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "notes": {
+      "type": "string",
+      "description": "Reasons not tied to a code line, e.g. missing brief or diff (verdict block)."
+    },
+    "rejected": {
+      "type": "array",
+      "description": "Written by slp-evidence only: findings dropped, with the reason.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding", "reason"],
+        "properties": {"finding": {}, "reason": {"type": "string"}}
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lens", "severity", "file", "line", "evidence", "fix_hint"],
+      "properties": {
+        "lens": {"enum": ["business", "security", "perf", "scale"]},
+        "severity": {"enum": ["blocker", "major", "minor"]},
+        "file": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1},
+        "evidence": {"type": "string"},
+        "fix_hint": {"type": "string"}
+      }
+    }
+  }
+}

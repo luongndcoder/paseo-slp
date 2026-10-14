@@ -1,0 +1,15 @@
+{
+  "slice_id": "s1-export-service",
+  "round": 1,
+  "verdict": "fix",
+  "findings": [
+    {
+      "lens": "security",
+      "severity": "blocker",
+      "file": "src/campaign/export/exporter.py",
+      "line": 42,
+      "evidence": "rows = repo.find_all()",
+      "fix_hint": "Pass merchant_id to the repository query so the export stays tenant scoped."
+    }
+  ]
+}

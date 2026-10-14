@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slp.local/schemas/verify.schema.json",
+  "title": "SLP verify report (slp-verify -> Lead)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["slice_id", "round", "verdict", "base_ref", "repo", "changed_files", "checks"],
+  "properties": {
+    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "round": {"type": "integer", "minimum": 1},
+    "verdict": {"enum": ["pass", "fail", "block"]},
+    "base_ref": {"type": "string", "minLength": 1},
+    "repo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "config"],
+      "properties": {
+        "name": {"type": "string"},
+        "config": {"type": ["string", "null"], "description": "Repo config path, null if none."}
+      }
+    },
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "generated_at": {"type": "string"},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "evidence"],
+        "properties": {
+          "name": {
+            "enum": [
+              "test", "lint", "typecheck", "scope", "writer_conflict", "hard_gate",
+              "sandbox_escape", "contract"
+            ]
+          },
+          "status": {"enum": ["pass", "fail", "block", "skipped", "unconfigured"]},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

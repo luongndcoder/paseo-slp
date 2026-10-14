@@ -1,0 +1,19 @@
+role: agy-builder
+family: antigravity
+provider_id: antigravity   # override of the built-in plugin provider (the only non-slp key slp-build writes)
+agent_name: slp-agy-builder   # ~/.gemini/config/agents/slp-agy-builder.md (installed by slp-build --apply)
+label: "SLP Agy Builder"
+description: "SLP peer builder (Antigravity agent slp-agy-builder): file read/search + write/edit + run_command; no browser/web/subagent tools; slp-verify is the net"
+write: all
+bash: all   # run_command is needed for tests; agy cannot restrict commands or write paths
+bash_allow: []
+bash_deny: []
+# allowlist names; NOTE init.tools lists the full catalog and `command_status` is rejected by the allowlist
+# registry ("tool not found in registry" = agent fails to start). Re-run conformance after any change (names drift)
+agy_tools: [view_file, list_dir, grep_search, find_by_name, write_to_file, replace_file_content, multi_replace_file_content, run_command]
+# always present regardless of the allowlist (seen in conformance): task-tracking scratchpad, no side effects
+agy_internal_tools: [manage_task]
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: []
+probe: {model: "gemini-4-argon-medium", mode: null}

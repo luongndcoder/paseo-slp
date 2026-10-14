@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""slp-validate: check an SLP artifact against its JSON Schema.
+
+  slp-validate <file> [--kind result|verify|review|final-review|brief|workstream|report]
+
+Markdown artifacts (brief/workstream/report) validate their YAML front-matter.
+Exit 0 valid, 1 invalid, 2 usage/read error. Not on the Lead's bash allowlist (humans/tests).
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+_VENV_PY = Path.home() / ".claude" / "skills" / ".venv" / "bin" / "python3"
+if __name__ == "__main__" and _VENV_PY.is_file() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from slp_schema import (  # noqa: E402
+    SCHEMAS,
+    ArtifactError,
+    detect_kind,
+    load_json,
+    parse_front_matter,
+    schema_errors,
+)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("file")
+    ap.add_argument("--kind", choices=sorted(SCHEMAS))
+    args = ap.parse_args()
+    path = Path(args.file)
+    try:
+        kind = args.kind or detect_kind(path)
+        if kind in {"brief", "workstream", "report"}:
+            data, _ = parse_front_matter(path.read_text())
+        else:
+            data = load_json(path)
+    except (ArtifactError, OSError) as exc:
+        print(f"slp-validate: {exc}", file=sys.stderr)
+        return 2
+    errors = schema_errors(data, kind)
+    for err in errors:
+        print(f"INVALID {path}: {err}")
+    if not errors:
+        print(f"OK {path} ({kind})")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

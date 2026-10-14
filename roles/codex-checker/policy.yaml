@@ -1,0 +1,13 @@
+role: codex-checker
+family: codex
+provider_id: slp-codex-checker
+label: "SLP Codex Checker"
+description: "SLP peer checker (Codex): sandbox read-only + approval never via -c; no Paseo tools; replies with ONE review JSON object (it cannot write files, the Lead saves the reply)"
+write: none          # enforced by codex sandbox_mode=read-only (-c); do NOT set a modeId on the profile
+bash: none
+bash_allow: []
+bash_deny: []
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: []
+probe: {model: auto-cheapest, mode: null, review_json: true}   # review_json: extra probe that must return valid review JSON

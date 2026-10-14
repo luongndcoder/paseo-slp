@@ -1,0 +1,113 @@
+# ============================================================================================
+# DRAFT - HEURISTIC PATTERNS, NEEDS MOBIO TEAM REVIEW BEFORE THE FIRST PILOT.
+# These regexes are a conservative first guess (false positives are expected and cheap: a
+# match only escalates, it never auto-fixes). Tune them per repo in repos/<repo>.yaml.
+# ============================================================================================
+# Loaded by bin/slp-verify and merged with the repo config (lists are concatenated).
+#
+# hard_gate_rules: any match => check `hard_gate` = block (escalate, never a fix-loop item).
+#   paths: regexes over changed file paths.
+#   lines: {sides: [added|removed], re: regex} over `git diff -U0` lines (sides default: both).
+#   `.slp/` artifacts are never scanned.
+# sandbox_escape: any match => check `sandbox_escape` = fail.
+#   paths: regexes over changed paths.
+#   structured: file-aware key diffs (base vs working tree) for package.json / pyproject.toml.
+status: DRAFT
+version: 1
+
+hard_gate_rules:
+  - id: tenant
+    description: tenant isolation (merchant_id / tenant_id filters, collection-per-tenant helpers)
+    lines:
+      - {sides: [removed], re: '(?i)(merchant_id|tenant_id)'}
+      - {re: '(?i)(get_collection_name|resolve_collection|collection_name|get_collection\b|collection_for)'}
+
+  - id: schema_index
+    description: DB schema / index changes and migrations
+    paths:
+      - '(^|/)migrations?/'
+      - '(^|/)alembic/'
+    lines:
+      - {re: '(?i)\b(create_index(es)?|ensure_index|drop_index(es)?|createIndex|dropIndex|ensureIndex|IndexModel)\b'}
+      - {re: '(?i)\b(create|drop|alter)\s+(unique\s+)?(index|table)\b'}
+
+  - id: kafka_contract
+    description: Kafka topic names, producer schemas, avro/json message schemas
+    paths:
+      - '\.avsc$'
+      - '(?i)(kafka|topic|event)[^/]*schemas?[^/]*\.json$'
+      - '(?i)(^|/)schemas?/[^/]*(kafka|topic|event)[^/]*\.json$'
+      - '(?i)producer[_-]?schemas?'
+    lines:
+      - {re: '^\s*[A-Z][A-Z0-9_]*TOPIC[A-Z0-9_]*\s*='}
+      - {re: '(?i)\btopic(_name)?s?\s*=\s*[\x27"]'}
+      - {re: '(?i)\b(producer|avro|kafka)_?schema\b'}
+
+  - id: auth
+    description: authentication / authorization code
+    paths:
+      - '(?i)(^|/)(auth\w*|permissions?|jwt\w*)(/|\.\w+$)'
+      - '(?i)middleware[^/]*auth|auth[^/]*middleware'
+    lines:
+      - {re: '(?i)\b(jwt|authorize|authorise|authorization|permissions?|require_auth|login_required|auth_required|verify_token|has_permission|check_permission)\b'}
+      - {re: '(?i)^\s*@\w*(auth|permission|login_required|jwt)\w*'}
+
+  - id: deploy_config
+    description: deploy / CI / container configuration
+    paths:
+      - '(^|/)release\.ya?ml$'
+      - '(^|/)applicationset\.ya?ml$'
+      - '(^|/)kustomization\.ya?ml$'
+      - '(^|/)Jenkinsfile[^/]*$'
+      - '(^|/)Dockerfile[^/]*$'
+      - '(^|/)k8s/'
+      - '^\.github/workflows/'
+      - '(^|/)\.gitlab-ci\.ya?ml$'
+
+  - id: pii
+    description: PII (cccd, cmnd, id_card, passport, phone, email, dob, address) in logs or new response fields
+    lines:
+      - {sides: [added], re: '(?i)(\blog(ger)?\.\w+|\blogging\.\w+|\bprint|console\.log)\s*\(.*(?<![a-z])(cccd|cmnd|id_card|passport|phone|email|dob|address)(?![a-z])'}
+      - {sides: [added], re: '(?i)[\x27"](cccd|cmnd|id_card|passport|phone|email|dob|address)\w*[\x27"]\s*:'}
+
+  - id: public_api
+    description: public API shape (route declarations, request/response schemas and serializers)
+    paths:
+      - '(?i)(^|/)(serializers?|schemas?)/'
+      - '(?i)(^|/)[\w.-]*(serializers?|request_schema|response_schema)\.(py|java|kt|ts|js)$'
+    lines:
+      - {re: '^\s*@[\w.]+\.route\('}
+      - {re: '^\s*@[\w.]*router\.(get|post|put|patch|delete)\('}
+      - {re: '^\s*@(Get|Post|Put|Patch|Delete|Request)Mapping\b'}
+
+  - id: core_banking
+    description: Core Banking / DWH writes
+    lines:
+      - {re: '(?i)(core_?bank\w*|\bt24\b|\bdwh\b).*(insert|update|write)'}
+      - {re: '(?i)(insert|update|write).*(core_?bank\w*|\bt24\b|\bdwh\b)'}
+
+sandbox_escape:
+  paths:
+    - '(^|/)\.(claude|codex|opencode|agents)/'
+    - '^\.git/(hooks|config)'
+    - '(^|/)\.gitconfig$'
+    - '(^|/)\.mcp\.json$'
+    - '(^|/)\.pre-commit-config\.yaml$'
+    - '(^|/)\.(husky|githooks)/'
+    - '(^|/)Makefile$'
+    - '(^|/)setup\.cfg$'
+    - '(^|/)tox\.ini$'
+  structured:
+    - path_re: '(^|/)package\.json$'
+      format: json
+      key_patterns:
+        - '^scripts(\.|$)'
+        - '^husky(\.|$)'
+        - '^lint-staged(\.|$)'
+        - '^simple-git-hooks(\.|$)'
+    - path_re: '(^|/)pyproject\.toml$'
+      format: toml
+      key_patterns:
+        - '^build-system(\.|$)'
+        - '^project\.(scripts|gui-scripts|entry-points)(\.|$)'
+        - '(?i)^tool\..*(script|hook|cmdclass|addopts|\.poe|taskipy)'

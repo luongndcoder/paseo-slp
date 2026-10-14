@@ -1,0 +1,42 @@
+role: lead
+family: claude
+provider_id: slp-lead
+label: "SLP Lead"
+description: "SLP workstream lead: writes only under .slp/, bash limited to slp-verify and read-only git, dispatches via Paseo"
+write: slp-only
+slp_scope: repo       # may write .slp/** in ANY worktree of the same repo (git common dir)
+bash: allowlist
+bash_allow:          # regexes over the normalized segment "<cmd> <args>" (git global options stripped)
+  - '^slp-(verify|evidence)(\s|$)'
+  - '^git (status|diff|log|show|rev-parse)(\s|$)'
+  - '^git branch(\s|$)'
+  - '^git merge(\s|$)'
+  - '^git worktree list(\s|$)'
+bash_deny:
+  - '\s--output(=|\s|$)'
+  - '^git branch\b.*\s(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force)(\s|$)'
+protected_branches: [test, master, develop]   # git merge/rebase/pull denied while HEAD is one of these
+paseo_tools:
+  enabled: true
+  disabled:
+    - create_terminal
+    - kill_terminal
+    - capture_terminal
+    - send_terminal_keys
+    - list_terminals
+    - start_workspace_script
+    - stop_workspace_script
+    - create_schedule
+    - create_heartbeat
+    - delete_heartbeat
+    - update_schedule
+    - delete_schedule
+    - pause_schedule
+    - resume_schedule
+    - run_schedule_once
+    - respond_to_permission
+    - kill_agent
+    - "browser_*"   # expanded by slp-build to every browser_* tool
+skills_auto: [paseo, be-git, be-troubleshoot, slp-lead]
+deny_tools: [NotebookEdit]
+probe: {model: claude-haiku-5-5, mode: bypassPermissions}

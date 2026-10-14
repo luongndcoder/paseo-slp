@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""slp-verify: deterministic (0 LLM) verification of one slice in a worktree.
+
+  slp-verify <worktree> <slice-id> [--round N] [--repo-config PATH]
+  slp-verify --init <worktree>     append `.slp/` to <git common dir>/info/exclude (idempotent, exit 0)
+
+Reads .slp/slices/<id>/brief.md front-matter, runs test/lint/typecheck from the repo config and
+the scope / writer_conflict / hard_gate / sandbox_escape / contract checks, writes
+.slp/slices/<id>/verify.<round>.json.  Exit: 0 pass, 1 fail, 3 block, 2 usage/internal error.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+_VENV_PY = Path.home() / ".claude" / "skills" / ".venv" / "bin" / "python3"
+if __name__ == "__main__" and _VENV_PY.is_file() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import slp_git  # noqa: E402
+import slp_rules  # noqa: E402
+from slp_schema import (  # noqa: E402
+    ID_RE,
+    ArtifactError,
+    load_front_matter,
+    load_json,
+    schema_errors,
+)
+
+EVIDENCE_TAIL = 60
+DEFAULT_TIMEOUT = 600
+EXIT = {"pass": 0, "fail": 1, "block": 3}
+
+
+def check(name: str, status: str, evidence: list[str] | None = None) -> dict[str, Any]:
+    return {"name": name, "status": status, "evidence": evidence or []}
+
+
+def tail(text: str, n: int = EVIDENCE_TAIL) -> list[str]:
+    return [ln[:500] for ln in text.splitlines()[-n:]]
+
+
+# ---------------------------------------------------------------- commands
+def run_command(name: str, spec: Any, worktree: Path, tests: list[str]) -> dict[str, Any]:
+    if not isinstance(spec, dict) or ("cmd" not in spec and "skip" not in spec):
+        return check(name, "unconfigured", ["no command configured in the repo config"])
+    if "skip" in spec:
+        return check(name, "skipped", [f"skipped by repo config: {spec['skip']}"])
+    quoted = " ".join(shlex.quote(t) for t in tests)
+    cmd = str(spec["cmd"]).replace("{tests}", quoted)
+    timeout = float(spec.get("timeout", DEFAULT_TIMEOUT))
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", cmd],
+        cwd=worktree,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        out, _ = proc.communicate()
+        timed_out = True
+    took = time.monotonic() - started
+    if timed_out:
+        head = f"$ {cmd} -> TIMEOUT after {timeout:.0f}s"
+        status = "fail"
+    else:
+        head = f"$ {cmd} -> exit {proc.returncode} in {took:.1f}s"
+        status = "pass" if proc.returncode == 0 else "fail"
+    return check(name, status, [head, *tail(out or "")])
+
+
+# ---------------------------------------------------------------- slice checks
+def check_scope(changed: list[str], allowed: list[str]) -> dict[str, Any]:
+    ok = {a[2:] if a.startswith("./") else a for a in allowed}
+    outside = [f for f in changed if f not in ok and not f.startswith(slp_rules.SLP_DIR)]
+    if outside:
+        return check("scope", "fail", [f"changed file not in brief.files: {f}" for f in outside])
+    return check("scope", "pass", [f"{len(changed)} changed file(s) within brief.files"])
+
+
+def check_writer_conflict(
+    slp_root: Path, slice_id: str, brief: dict[str, Any], changed: list[str]
+) -> dict[str, Any]:
+    group = brief.get("parallel_group")
+    if not group:
+        return check("writer_conflict", "skipped", ["brief has no parallel_group"])
+    evidence: list[str] = []
+    for other_brief in sorted((slp_root / "slices").glob("*/brief.md")):
+        if other_brief.parent.name == slice_id:
+            continue
+        try:
+            other, _ = load_front_matter(other_brief, "brief")
+        except ArtifactError as exc:
+            evidence.append(f"cannot read {other_brief.parent.name}/brief.md: {exc}")
+            continue
+        if other.get("parallel_group") != group:
+            continue
+        shared = sorted(set(changed) & set(other["files"]))
+        evidence += [f"{f} is also owned by parallel slice {other['slice_id']}" for f in shared]
+    if evidence:
+        return check("writer_conflict", "fail", evidence)
+    return check("writer_conflict", "pass", [f"no overlap inside parallel_group {group!r}"])
+
+
+def check_contract(slp_root: Path, slice_id: str) -> dict[str, Any]:
+    path = slp_root / "slices" / slice_id / "result.json"
+    if not path.is_file():
+        return check("contract", "fail", [f"missing {path}"])
+    try:
+        data = load_json(path)
+    except ArtifactError as exc:
+        return check("contract", "fail", [str(exc)])
+    errors = schema_errors(data, "result")
+    if not errors and data["slice_id"] != slice_id:
+        errors = [f"slice_id {data['slice_id']!r} != {slice_id!r}"]
+    if errors:
+        return check("contract", "fail", errors)
+    return check("contract", "pass", [f"result.json valid (status={data['status']})"])
+
+
+def overall(checks: list[dict[str, Any]]) -> str:
+    statuses = {c["status"] for c in checks}
+    if "block" in statuses:
+        return "block"
+    if statuses & {"fail", "unconfigured"}:  # unconfigured is never a pass
+        return "fail"
+    return "pass"
+
+
+def next_round(slice_dir: Path) -> int:
+    rounds = [int(m.group(1)) for p in slice_dir.glob("verify.*.json")
+              if (m := re.fullmatch(r"verify\.(\d+)\.json", p.name))]  # fmt: skip
+    return max(rounds, default=0) + 1
+
+
+def verify(args: argparse.Namespace) -> int:
+    worktree = Path(args.worktree).resolve()
+    if not worktree.is_dir():
+        raise ArtifactError(f"worktree {worktree} is not a directory")
+    if not ID_RE.match(args.slice_id):
+        raise ArtifactError(f"invalid slice id {args.slice_id!r}")
+    slp_root = worktree / ".slp"
+    slice_dir = slp_root / "slices" / args.slice_id
+    brief, _ = load_front_matter(slice_dir / "brief.md", "brief")
+    if brief["slice_id"] != args.slice_id:
+        raise ArtifactError(f"brief slice_id {brief['slice_id']!r} != {args.slice_id!r}")
+
+    explicit = Path(args.repo_config).resolve() if args.repo_config else None
+    if explicit is not None:
+        # WHY: repo config holds commands that run with the Lead's rights. Builders can write
+        # anywhere they have write tools (worktree, /tmp), so only the reviewed repos/ dir is
+        # trusted; anything else would let a builder smuggle commands through the Lead.
+        # SLP_REPOS_DIR exists for tests only; the Lead guard never allows an env prefix.
+        default_repos = Path(__file__).resolve().parent.parent / "repos"
+        repos_dir = Path(os.environ.get("SLP_REPOS_DIR") or default_repos).resolve()
+        try:
+            explicit.relative_to(repos_dir)
+        except ValueError:
+            raise ArtifactError(f"--repo-config must live under {repos_dir}: {explicit}")
+    name = slp_git.repo_name(worktree)
+    cfg_path = slp_rules.resolve_config(name, explicit)
+    cfg = slp_rules.load_config(name, cfg_path)
+
+    base = brief["base_ref"]
+    slp_git.git(worktree, "rev-parse", "--verify", f"{base}^{{commit}}")  # fail early
+    changed = slp_git.changed_files(worktree, base)  # snapshot BEFORE commands add artifacts
+    lines = slp_git.diff_lines(worktree, base)
+
+    checks = [
+        run_command(n, (cfg["commands"] or {}).get(n), worktree, brief["tests_must_pass"])
+        for n in ("test", "lint", "typecheck")
+    ]
+    checks.append(check_scope(changed, brief["files"]))
+    checks.append(check_writer_conflict(slp_root, args.slice_id, brief, changed))
+    gate = slp_rules.scan_hard_gates(cfg["hard_gate_rules"], changed, lines)
+    checks.append(
+        check("hard_gate", "block", gate) if gate else check("hard_gate", "pass", ["no match"])
+    )
+    esc = slp_rules.scan_sandbox_escape(cfg, worktree, changed, slp_git.merge_base(worktree, base))
+    checks.append(
+        check("sandbox_escape", "fail", esc)
+        if esc
+        else check("sandbox_escape", "pass", ["no match"])
+    )
+    checks.append(check_contract(slp_root, args.slice_id))
+
+    rnd = args.round or next_round(slice_dir)
+    verdict = overall(checks)
+    doc = {
+        "slice_id": args.slice_id,
+        "round": rnd,
+        "verdict": verdict,
+        "base_ref": base,
+        "repo": {"name": name, "config": str(cfg_path) if cfg_path else None},
+        "changed_files": changed,
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "checks": checks,
+    }
+    errors = schema_errors(doc, "verify")
+    if errors:
+        raise ArtifactError("internal: verify.json violates its schema: " + "; ".join(errors))
+    out = slice_dir / f"verify.{rnd}.json"
+    out.write_text(json.dumps(doc, indent=2) + "\n")
+    print(f"slp-verify {args.slice_id} round {rnd}: {verdict.upper()}  ({out})")
+    for c in checks:
+        first = c["evidence"][0] if c["evidence"] else ""
+        print(f"  {c['name']:16} {c['status']:13} {first[:110]}")
+    return EXIT[verdict]
+
+
+def init_worktree(worktree_arg: str) -> int:
+    worktree = Path(worktree_arg).resolve()
+    if not worktree.is_dir():
+        raise ArtifactError(f"worktree {worktree} is not a directory")
+    exclude, changed = slp_git.ensure_excluded(worktree)
+    if changed:
+        print(f"slp-verify --init: appended '.slp/' to {exclude}")
+    else:
+        print(f"slp-verify --init: '.slp/' already excluded in {exclude} (no change)")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("worktree")
+    ap.add_argument("slice_id", nargs="?")
+    ap.add_argument("--init", action="store_true", help="only add `.slp/` to the repo's info/exclude")
+    ap.add_argument("--round", type=int, default=0, help="default: next free round number")
+    ap.add_argument("--repo-config", help="repo config YAML (must be outside the worktree)")
+    try:
+        args = ap.parse_args()
+    except SystemExit as exc:
+        return 2 if exc.code else 0
+    if args.init:
+        if args.slice_id is not None:
+            print("slp-verify: --init takes only <worktree>", file=sys.stderr)
+            return 2
+        try:
+            return init_worktree(args.worktree)
+        except (ArtifactError, slp_git.GitError) as exc:
+            print(f"slp-verify: error: {exc}", file=sys.stderr)
+            return 2
+    if args.slice_id is None:
+        print("slp-verify: slice_id is required (or use --init <worktree>)", file=sys.stderr)
+        return 2
+    if args.round < 0:
+        print("slp-verify: --round must be >= 1", file=sys.stderr)
+        return 2
+    try:
+        return verify(args)
+    except (ArtifactError, slp_git.GitError) as exc:
+        print(f"slp-verify: error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - internal errors must map to exit 2
+        print(f"slp-verify: internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,19 @@
+role: claude-integration-reviewer
+family: claude
+provider_id: slp-claude-integration-reviewer
+label: "SLP Claude Integration Reviewer"
+description: "SLP integration reviewer (Claude): reads code, writes only .slp/integration-review.json, no Paseo tools"
+write: slp-only      # only its own review JSON under .slp/ (hook-enforced); bash stays readonly
+bash: readonly
+bash_allow:
+  - '^git (diff|log|show|status)(\s|$)'
+  - '^(cat|ls|rg|grep)(\s|$)'
+bash_deny:
+  - '\s--output(=|\s|$)'
+  - '\s--pre(-glob)?(=|\s|$)'
+  - '\s--(ext-diff|textconv)(\s|$)'
+protected_branches: []
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: [Agent, Task, NotebookEdit]
+probe: {model: claude-haiku-5-5, mode: bypassPermissions}

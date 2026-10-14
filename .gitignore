@@ -1,0 +1,7 @@
+build/
+conformance/
+__pycache__/
+*.pyc
+.scratch/
+.DS_Store
+

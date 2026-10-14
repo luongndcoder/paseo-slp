@@ -1,0 +1,16 @@
+role: opencode-builder
+family: opencode
+provider_id: slp-opencode-builder
+label: "SLP OpenCode Builder"
+description: "SLP peer builder (OpenCode agent slp-builder): edit allowed, bash allowed except git push, task denied, steps capped"
+agent_name: slp-builder     # select with profile modeId = slp-builder (never --agent)
+steps: 80
+write: all
+bash: all-except
+bash_allow: []
+bash_deny: ['git push*', 'git reset --hard*', 'git branch -D*', 'git branch -d*']
+protected_branches: []
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: [task]
+probe: {model: "opencode-go/deepseek-v4.1-flash", mode: slp-builder, skip_reason: "opencode quota exhausted"}
