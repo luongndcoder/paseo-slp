@@ -37,13 +37,37 @@ Ngoài phạm vi: thay đổi Paseo core, provider mới, logic nghiệp vụ Mo
 
 ## 3. Luồng & escalation
 
-```
-User ⇄ Supervisor ──workstream brief──▶ Lead ──slice brief──▶ Builder ──result.json──▶ Lead
-                                          │                                              │
-                                          └──diff + brief──▶ Checker ──review.json──▶ Lead
-Lead ──slp-verify──▶ verify.json            (deterministic, 0 token LLM)
-Lead ──(mọi slice xong)──▶ Final Reviewer ──▶ Lead ──report.md──▶ Supervisor ──▶ User
-Supervisor ──(≥2 workstream chung contract)──▶ Integration Reviewer ──verdict──▶ Supervisor
+```mermaid
+flowchart TD
+    User(["👤 User"])
+    Supervisor["Supervisor (Opus)<br/>Scope & Workstream Planning"]
+    Lead["Lead (Sonnet)<br/>Slice Breakdown & Quality Orchestration"]
+    Builder["Builder (Peer)<br/>Code Implementation"]
+    SLPVerify["slp-verify<br/>(Deterministic 0-LLM Gate)"]
+    Checker["Checker (Peer)<br/>Cross-Model Lens Review"]
+    SLPEvidence["slp-evidence<br/>(Evidence Validation)"]
+    FinalRev["Final Reviewer<br/>Whole-Workstream Audit"]
+    IntegrationRev["Integration Reviewer<br/>Cross-Contract Audit"]
+
+    User <-->|"Discovery / Direct Chat"| Supervisor
+    User <-->|"Direct Entry (Single WS)"| Lead
+    Supervisor -->|"workstream.md"| Lead
+    Lead -->|"brief.md (slice scope)"| Builder
+    Builder -->|"result.json"| Lead
+    
+    Lead -->|"Deterministic Test/Lint/Scope"| SLPVerify
+    SLPVerify -->|"verify.<round>.json"| Lead
+    
+    Lead -->|"diff + brief.md"| Checker
+    Checker -->|"review.json"| SLPEvidence
+    SLPEvidence -->|"review.checked.json"| Lead
+    
+    Lead -->|"Full Workstream Diff"| FinalRev
+    FinalRev -->|"final-review.json"| Lead
+    
+    Lead -->|"report.md"| Supervisor
+    Supervisor -.->|"≥2 WS Shared Contract"| IntegrationRev
+    Supervisor -->|"Final Acceptance"| User
 ```
 
 - **Hai entry point:**
@@ -235,6 +259,15 @@ Baseline so sánh: cùng task chạy 1 agent Sonnet (hoặc Lead-direct). Chưa 
 
 1. ~~Tên tool `paseoTools.disabledTools`~~ — đã trả lời (§5 Wiring).
 2. ~~Cách Paseo spawn từng provider~~ — đã trả lời (§5 Wiring); 4 điểm unknown chuyển thành probe conformance.
+
+### Quyết định 2026-10-15
+- Giữ override `antigravity` gốc và giữ nguyên `daemon.appendSystemPrompt`: việc riêng (e2e…) chạy ngoài Paseo không bị ảnh hưởng; trong Paseo chấp nhận Antigravity = builder SLP và mọi agent nhận rule Mobio global.
+
+### Push-block log (2026-10-15)
+- `slp-claude-builder`, `slp-pi-builder`, `slp-opencode-builder`: env `GIT_CONFIG_COUNT=9` + `url.nopush:///.pushInsteadOf` cho `git@ https:// http:// ssh:// file:// / ./ ../ git://` → mọi push bị đổi sang transport không tồn tại; fetch/commit vẫn chạy. Chỉ provider `slp-*`; provider gốc + override antigravity không đổi.
+- OpenCode: server dùng chung (singleton) không nhận env theo provider (fork `opencode/server-manager.ts:120-138, 338-342`) → thêm bash deny `*git*push*` (rule cuối). Conformance OpenCode UNVERIFIED (quota).
+- Conformance claude-builder, pi-builder: PASS (bare origin không nhận commit; lỗi `nopush` do git chặn, không chỉ hook). Test: 83 pass.
+- Giới hạn: git không áp `pushInsteadOf` cho `remote.<name>.pushurl` đặt tường minh → model cố tình vẫn có thể lách (tạo remote mới có pushurl). Lớp chắc nhất là không cấp credential push cho builder (chưa làm).
 
 ### P3 log + quyết định thiết kế (2026-10-14)
 Skill nháp: `skills/slp-lead/` (SKILL.md 152 dòng + references/profiles.md, prompts.md), `skills/slp-supervisor/SKILL.md` (103 dòng). Chưa cài.
