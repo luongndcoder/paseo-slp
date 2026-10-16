@@ -27,6 +27,7 @@ import yaml  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import slp_git_push_block  # noqa: E402
 import slp_paseo  # noqa: E402
 import slp_policy  # noqa: E402
 import slp_skills_install  # noqa: E402
@@ -105,6 +106,21 @@ def paseo_tools(policy: dict[str, Any]) -> dict[str, Any]:
     if not pt.get("enabled", False):
         return {"enabled": False}
     return {"enabled": True, "disabledTools": expand_disabled(pt.get("disabled", []))}
+
+
+def provider_env(policy: dict[str, Any]) -> dict[str, str]:
+    """Provider `env`: optional policy `env:` map, plus the git-level push block when `git_push_block: true`."""
+    env = {str(k): str(v) for k, v in (policy.get("env") or {}).items()}
+    if policy.get("git_push_block"):
+        env = slp_git_push_block.with_push_block(env)
+    return env
+
+
+def add_env(provider: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    env = provider_env(policy)
+    if env:
+        provider["env"] = env
+    return provider
 
 
 # ---------------------------------------------------------------- claude
@@ -241,6 +257,12 @@ def opencode_provider(policy: dict[str, Any]) -> dict[str, Any]:
     bash_rules: dict[str, str] = {"*": "allow"}
     for pat in policy.get("bash_deny", []):  # last matching rule wins in OpenCode
         bash_rules[pat] = "deny"
+    if policy.get("git_push_block"):
+        # WHY: the git-level block (provider env GIT_CONFIG_*) only reaches the shared `opencode serve` when this
+        # provider happened to construct the process-wide OpenCodeServerManager first (server-manager.ts:120-138,
+        # :338-342 in the fork), so for OpenCode the permission pattern is the real enforcement. It matches
+        # `git push`, `git -C x push`, `git -c a=b push` ...; it stays LAST so it wins over `*: allow`.
+        bash_rules["*git*push*"] = "deny"
     front = {
         "description": policy["description"],
         "mode": "primary",
@@ -368,6 +390,8 @@ def generate() -> dict[str, dict[str, Any]]:
                 provider["label"] = policy["override_label"]
         else:
             sys.exit(f"{role}: unsupported family {fam}")
+        if fam != "antigravity":  # the antigravity override only ever merges command/paseoTools/label
+            add_env(provider, policy)
         pid = policy["provider_id"]
         if not (pid.startswith(PREFIX) or (fam == "antigravity" and pid in PLAIN_OVERRIDE_KEYS)):
             sys.exit(f"{role}: provider_id must start with {PREFIX}")

@@ -10,7 +10,10 @@ bash: all-except
 bash_allow: []
 bash_deny: ['git push*', 'git reset --hard*', 'git branch -D*', 'git branch -d*']
 protected_branches: []
+# WHY: git itself rejects every push (slp-build adds GIT_CONFIG_* pushInsteadOf=nopush:/// to provider env), so a
+# push hidden behind an alias/script/`git -c` fails too; fetch and commit keep working.
+git_push_block: true
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: []
 deny_tools: [task]
-probe: {model: "opencode-go/deepseek-v4.1-flash", mode: slp-builder, skip_reason: "opencode quota exhausted"}
+probe: {model: "opencode-go/deepseek-v4.1-flash", mode: slp-builder, git_push: true, skip_reason: "opencode quota exhausted"}

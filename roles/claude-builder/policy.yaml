@@ -12,7 +12,10 @@ bash_deny:           # regexes over the normalized segment "<cmd> <args>" (git g
   - '^git branch\b.*\s(-d|-D|--delete)(\s|$)'
   - '^rm\b(?=.*\s-\S*[rR])(?=.*\s(/|/\*|~|~/\*?|\$HOME|\$HOME/\*?)(\s|$))'
 protected_branches: [test, master, develop]   # git merge/rebase/pull/checkout/switch of these denied
+# WHY: git itself rejects every push (slp-build adds GIT_CONFIG_* pushInsteadOf=nopush:/// to provider env), so a
+# push hidden behind an alias/script/`git -c` fails too; fetch and commit keep working.
+git_push_block: true
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: [be-git, be-api-docs-sync]
 deny_tools: [Agent, Task, NotebookEdit]
-probe: {model: claude-haiku-5-5, mode: bypassPermissions}
+probe: {model: claude-haiku-5-5, mode: bypassPermissions, git_push: true}

@@ -7,7 +7,10 @@ write: all
 bash: all   # default Pi tools; no harness-level restriction available
 bash_allow: []
 bash_deny: []
+# WHY: git itself rejects every push (slp-build adds GIT_CONFIG_* pushInsteadOf=nopush:/// to provider env), so a
+# push hidden behind an alias/script/`git -c` fails too; fetch and commit keep working.
+git_push_block: true
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: []
 deny_tools: []
-probe: {model: "openai-api/gemini-3.8-flash-high", mode: null}
+probe: {model: "openai-api/gemini-3.8-flash-high", mode: null, git_push: true}
