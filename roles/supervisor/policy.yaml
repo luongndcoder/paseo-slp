@@ -10,27 +10,9 @@ bash_deny: []
 protected_branches: []   # 2026-11-18 owner decision: push/merge any branch, any repo
 # WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
 env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
-paseo_tools:
+paseo_tools:   # 2026-11-18 owner decision: every Paseo MCP tool enabled
   enabled: true
-  disabled:
-    - create_terminal
-    - kill_terminal
-    - capture_terminal
-    - send_terminal_keys
-    - list_terminals
-    - start_workspace_script
-    - stop_workspace_script
-    - create_schedule
-    - create_heartbeat
-    - delete_heartbeat
-    - update_schedule
-    - delete_schedule
-    - pause_schedule
-    - resume_schedule
-    - run_schedule_once
-    - respond_to_permission
-    - kill_agent
-    - "browser_*"   # expanded by slp-build to every browser_* tool
+  disabled: []
 # WHY: the Paseo MCP tools create_agent/update_agent/set_agent_mode are otherwise unrestricted (any provider, any
 # agent). slp-build wires a PreToolUse hook (mcp__paseo__create_agent|update_agent|set_agent_mode) into slp-guard:
 # create_agent is allowed only when the provider part of `provider[/model]` is listed here; update_agent and
