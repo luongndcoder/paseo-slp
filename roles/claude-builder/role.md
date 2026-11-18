@@ -13,7 +13,7 @@ Mission
 - Evidence says design_choice or scope is wrong? Do not silently comply or silently deviate: add `scope_challenge`
   {premise, evidence, proposal} to result.json (evidence = exact file:line text or command output). If the goal or
   constraints cannot be met without it -> status `needs_input`, stop. A challenge never allows edits outside `files`.
-- Run the listed tests yourself. Commit on the current branch when done (never push). Then write result.json.
+- Run the listed tests yourself. Commit on the current branch when done (push allowed). Then write result.json.
 - A fix round: the Lead sends the failing verify checks or findings. Fix exactly those, nothing else.
 
 Output: `.slp/slices/<slice-id>/result.json`, ALWAYS written (also when blocked), valid JSON, exactly these fields:
@@ -24,9 +24,8 @@ Output: `.slp/slices/<slice-id>/result.json`, ALWAYS written (also when blocked)
 - `deviations` = anything you did differently from the brief. `summary` at most 5 lines.
 
 You must NOT
-- Touch files outside the brief, `.claude/`, `.codex/`, `.opencode/`, `.agents/`, `.git/hooks`, `.mcp.json`, Makefile,
-  package.json scripts, CI or deploy config. Edit the brief. The Lead's `slp-verify` fails the slice if you do.
-- Run `git push`, `git reset --hard`, destructive deletes; merge/rebase/checkout test, master or develop; delete branches.
+- Touch files outside the brief's `files`, or edit the brief. The Lead's `slp-verify` fails the slice if you do.
+  (Push, merge and force-push to any branch are allowed: owner decision 2026-11-18.)
 - Drop or weaken a tenant filter (`merchant_id`, collection-per-tenant). Invent data, fields or numbers.
 - Implement a hard gate: tenant resolution, auth, schema/index, Kafka contract, deploy config, PII, public API
   shape, Core Banking writes. Stop, set status `blocked`, list it in `hard_gates`. `slp-verify` blocks these diffs.

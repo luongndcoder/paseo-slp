@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -52,30 +53,28 @@ class BuildSettingsTests(unittest.TestCase):
             self.assertEqual(self.overrides(role)["slp-lead"], "off")
             self.assertEqual(self.overrides(role)["slp-supervisor"], "off")
 
-    def test_checker_policy_is_slp_only_with_readonly_bash(self) -> None:
+    def test_checker_policy_is_open_since_2026_11_18(self) -> None:
         for role in ("claude-checker", "claude-final-reviewer", "claude-integration-reviewer"):
-            self.assertEqual(self.roles[role]["write"], "slp-only")
-            self.assertEqual(self.roles[role]["bash"], "readonly")
+            self.assertEqual(self.roles[role]["bash"], "all-except")
+            self.assertEqual((self.roles[role]["bash_allow"], self.roles[role]["bash_deny"]), ([], []))
+            self.assertIn(self.roles[role]["write"], ("all", "slp-only"))  # claude-checker still declares slp-only (moot: guard allows)
             settings, guard_policy, _ = self.build.claude_artifacts(self.roles[role], self.skills)
             self.assertNotIn("Write", settings["permissions"]["deny"])
-            matchers = [h["matcher"] for h in settings["hooks"]["PreToolUse"]]
-            self.assertIn("Edit|Write|MultiEdit|NotebookEdit", matchers)
+            self.assertEqual(guard_policy["bash"], "all-except")
             self.assertEqual(guard_policy["slp_scope"], "cwd")
         _, lead_policy, _ = self.build.claude_artifacts(self.roles["lead"], self.skills)
-        self.assertEqual(lead_policy["slp_scope"], "repo")
+        self.assertEqual(lead_policy["slp_scope"], "cwd")  # 2026-11-18: slp_scope: repo dropped (write: all)
 
-    def test_codex_checker_mirrors_advisor_flags(self) -> None:
-        self.assertEqual(self.roles["codex-checker"]["provider_id"], "slp-codex-checker")
-        adv = self.build.codex_provider(self.roles["codex-advisor"])["command"]
-        chk = self.build.codex_provider(self.roles["codex-checker"])["command"]
-        self.assertEqual(len(adv), len(chk))
-        keys = lambda cmd: [a.split("=", 1)[0] for a in cmd if a != "-c"]  # noqa: E731
-        self.assertEqual(keys(adv), keys(chk))
-        joined = " ".join(chk)
-        for needle in ('sandbox_mode="read-only"', 'approval_policy="never"', "features.multi_agent=false",
-                       "model_catalog_json=", "developer_instructions=", "model_instructions_file="):  # fmt: skip
-            self.assertIn(needle, joined)
-        self.assertIn("codex-checker/role.md", chk[-1])
+    def test_advisor_policy_is_open_with_no_auto_skills(self) -> None:
+        self.assertEqual(self.roles["claude-advisor"]["provider_id"], "slp-claude-advisor")
+        self.assertEqual((self.roles["claude-advisor"]["write"], self.roles["claude-advisor"]["bash"]), ("all", "all-except"))
+        ov = self.overrides("claude-advisor")
+        self.assertNotIn("on", set(ov.values()))  # skills_auto is empty: every managed skill stays off
+        self.assertEqual(ov["slp-lead"], "off")
+        self.assertEqual(ov["slp-supervisor"], "off")
+        settings, _, _ = self.build.claude_artifacts(self.roles["claude-advisor"], self.skills)
+        self.assertNotIn("Write", settings["permissions"]["deny"])  # write opened 2026-11-18
+        self.assertIn("AskUserQuestion", settings["permissions"]["deny"])
 
 
 class SymlinkTests(unittest.TestCase):

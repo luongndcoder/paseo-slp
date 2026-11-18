@@ -4,12 +4,12 @@ provider_id: slp-pi-builder
 label: "SLP Pi Builder"
 description: "SLP peer builder (Pi): role prompt via --append-system-prompt; no Paseo tools; Pi has no native permission layer (slp-verify is the net)"
 write: all
-bash: all   # default Pi tools; no harness-level restriction available
+bash: all
 bash_allow: []
 bash_deny: []
-# WHY: git itself rejects every push (slp-build adds GIT_CONFIG_* pushInsteadOf=nopush:/// to provider env), so a
-# push hidden behind an alias/script/`git -c` fails too; fetch and commit keep working.
-git_push_block: true
+protected_branches: []   # 2026-11-18 owner decision: push/merge any branch, any repo
+# WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
+env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
 # WHY: Pi has no permission layer, but `--exclude-tools` (name/glob denylist, applies to MCP tools too) removes the
 # tools that contradict the role: sub-agents (pi-subagents: subagent, subagents_enable, subagent_supervisor,
 # contact_supervisor, bg_wait), ask_user_question (rpiv), donsetch web tools, memongo_* (memory; can ship raw text out).

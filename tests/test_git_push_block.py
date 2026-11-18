@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -64,27 +65,36 @@ class PushBlockEnv(unittest.TestCase):
     def test_policies_and_generated_providers(self) -> None:
         mod = load_slp_build()
         roles = mod.load_roles()
-        flagged = {r for r, p in roles.items() if p.get("git_push_block")}
-        self.assertEqual(flagged, {"claude-builder", "pi-builder", "opencode-builder"})
+        # 2026-11-18 owner decision: no role carries the push block any more
+        self.assertEqual({r for r, p in roles.items() if p.get("git_push_block")}, set())
+        soft = {"MOBIO_GITFLOW_GUARD_MODE": "soft", "MOBIO_ALLOW_FORCE_PUSH": "1"}
         for role, policy in roles.items():
             env = mod.provider_env(policy)
-            self.assertEqual(bool(env), role in flagged, role)
-            if role in flagged:
-                self.assertEqual(env, gpb.with_push_block({}))
-        for role in flagged:  # raw yaml carries the flag too
+            self.assertNotIn("GIT_CONFIG_COUNT", env, role)
+            self.assertFalse(any(k.startswith("GIT_CONFIG_") for k in env), role)
+            self.assertEqual(env, soft, role)
             raw = yaml.safe_load((ROOT / "roles" / role / "policy.yaml").read_text())
-            self.assertIs(raw["git_push_block"], True)
+            self.assertFalse(raw.get("git_push_block"), role)
+        # the library path still works when a fixture policy opts in
+        fixture = {"role": "x", "git_push_block": True, "env": {"FOO": "1"}}
+        self.assertEqual(mod.provider_env(fixture), gpb.with_push_block({"FOO": "1"}))
 
     def test_opencode_permission_denies_git_push_glob_last(self) -> None:
         mod = load_slp_build()
-        policy = mod.load_roles()["opencode-builder"]
-        mod.opencode_provider(policy)
-        text = (ROOT / "build" / "opencode" / "slp-builder.md").read_text()
+        live = mod.load_roles()["opencode-builder"]
+        # live policy (2026-11-18): no push rule at all
+        self.assertNotIn("*git*push*", mod.opencode_bash_rules(live))
+        # fixture policy with git_push_block: true exercises the library path (rule stays last)
+        policy = {**live, "git_push_block": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(mod, "BUILD_DIR", Path(tmp)):
+                mod.opencode_provider(policy)
+            text = (Path(tmp) / "opencode" / f"{policy['agent_name']}.md").read_text()
         front = yaml.safe_load(text.split("---\n")[1])
         bash = list(front["permission"]["bash"].items())
         self.assertEqual(bash[0], ("*", "allow"))  # last matching rule wins: every deny comes after the allow
         self.assertEqual(bash[-1], ("*git*push*", "deny"))
-        self.assertIn(("git push*", "deny"), bash)
+        self.assertEqual(bash, [("*", "allow"), ("*git*push*", "deny")])  # live builder bash_deny is empty
 
 
 class PushBlockGit(unittest.TestCase):

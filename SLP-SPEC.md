@@ -21,7 +21,7 @@ Ngoài phạm vi: thay đổi Paseo core, provider mới, logic nghiệp vụ Mo
 | Số lượng | 1 / task | 1 / workstream | n / slice |
 | Nói với user | Có | Có (entry trực tiếp hoặc user vào chat) | Không |
 | Spawn agent | Chỉ Lead (+ Final Reviewer, Advisor) | Chỉ Peer | Không |
-| Sửa code | Không | Không (chỉ ghi `.slp/`) | Builder: có, trong scope slice; Peer khác: không |
+| Sửa code | Được phép (ưu tiên giao Lead) | Được phép (ưu tiên giao Builder) | Builder: có, trong scope slice; Peer khác: không |
 | Đọc diff | Không — chỉ đọc report | Có | Checker: có |
 | Model | Opus · thinking medium | Sonnet · medium | Theo vai (mục 5) |
 
@@ -29,7 +29,7 @@ Ngoài phạm vi: thay đổi Paseo core, provider mới, logic nghiệp vụ Mo
 
 **Supervisor** — ông sếp, chỉ quan tâm kết quả: Discovery với user (grill/options/devil/spike) → chia workstream → chọn Lead profile → nghiệm thu `report.md` → escalate hard gate cho user. Không đọc diff. Nếu ≥ 2 workstream chia sẻ contract (API / schema / Kafka) → gọi **Integration Reviewer** (Peer, chỉ trả verdict).
 
-**Lead**: Đọc code của workstream → chia slice (≤ ~8 file/slice) → viết slice brief **có inline code context** → dispatch Builder → chạy `slp-verify` → dispatch Checker (khác họ model) → fix loop → merge slice vào branch workstream (local, không push) → **Final Reviewer** cho cả workstream → report lên Supervisor.
+**Lead**: Đọc code của workstream → chia slice (≤ ~8 file/slice) → viết slice brief **có inline code context** → dispatch Builder → chạy `slp-verify` → dispatch Checker (khác họ model) → fix loop → merge slice vào branch workstream (được push) → **Final Reviewer** cho cả workstream → report lên Supervisor.
 
 **`slp-verify`** (script, không phải LLM): chạy test + lint + typecheck của repo trong worktree → `.slp/slices/<id>/verify.json`. Lead chỉ được phép chạy đúng lệnh này (permission allow 1 command). Kết quả là bằng chứng độc lập với lời khai của Builder. Verify fail không rõ nguyên nhân → Checker triage.
 
@@ -259,6 +259,14 @@ Baseline so sánh: cùng task chạy 1 agent Sonnet (hoặc Lead-direct). Chưa 
 
 1. ~~Tên tool `paseoTools.disabledTools`~~ — đã trả lời (§5 Wiring).
 2. ~~Cách Paseo spawn từng provider~~ — đã trả lời (§5 Wiring); 4 điểm unknown chuyển thành probe conformance.
+
+### Mở quyền git/shell/write (2026-11-18, quyết định của chủ máy) — thắng các mục cũ bên dưới
+- Mọi role SLP được push/merge lên MỌI nhánh (kể cả `test`/`master`/`develop`) ở MỌI repo dưới `~/Documents/mobio` và `~/.paseo/worktrees`. Force-push cũng được (provider env `MOBIO_ALLOW_FORCE_PUSH=1` mở escape trong hook global `forbidden-actions-check.cjs` + `destructive-guard.cjs`; xoá nhánh remote protected vẫn bị chặn).
+- `hooks/slp-guard.py`: PreToolUse luôn allow (bỏ giới hạn ghi `.slp/`, allow-list provider `create_agent`, chặn shell/git, protected branch). Bật lại kiểm tra cũ: env `SLP_GUARD_ENFORCE=1`. SessionStart (role prompt) giữ nguyên.
+- Policy: Supervisor/Lead `write: all`, `bash: all-except` (deny rỗng), `protected_branches: []`; builders bỏ `git_push_block` + bash deny; checkers bash mở hoàn toàn. Provider env `GIT_CONFIG_*` push-block đã gỡ (kể cả override `antigravity`).
+- Role prompt + `daemon.appendSystemPrompt`: bỏ "must NOT edit/write code", "must NOT run shell commands", "read-only git", "Never push / never merge test, master, develop", "Never touch files outside your workspace".
+- GIỮ NGUYÊN: hard gates (tenant resolution, auth, schema/index, Kafka contract, deploy config, PII, public API shape, Core Banking writes) vẫn dừng và escalate cho user; tenant isolation; `slp-verify` scope + hard_gate không đổi; `sandbox_escape` TẮT (báo `skipped`). Advisor/final/integration reviewer cũng mở full bash/write.
+- Rollback: các file `*.bak-20261118` cạnh file gốc (repo này, `~/.paseo/config.json`, `~/.claude/mobio-CLAUDE.md`, `~/.claude/rules-mobio/92-backend-discipline.md`) rồi `bin/slp-build --apply`.
 
 ### Fix 2026-10-28: Paseo không thấy agent OpenCode slp-builder/slp-checker
 - Nguyên nhân: `models` trong provider = replacement list; manifest OpenCode có static modes (build/plan) → `provider-registry.ts` fetchCatalog trả static modes, bỏ qua catalog runtime → `Invalid mode 'slp-checker'`.

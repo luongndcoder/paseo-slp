@@ -2,17 +2,16 @@ role: opencode-builder
 family: opencode
 provider_id: slp-opencode-builder
 label: "SLP OpenCode Builder"
-description: "SLP peer builder (OpenCode agent slp-builder): edit allowed, bash allowed except git push, task denied, steps capped"
+description: "SLP peer builder (OpenCode agent slp-builder): edit + bash allowed incl. git push (owner decision 2026-11-18), task denied, steps capped"
 agent_name: slp-builder     # select with profile modeId = slp-builder (never --agent)
 steps: 80
 write: all
 bash: all-except
 bash_allow: []
-bash_deny: ['git push*', 'git reset --hard*', 'git branch -D*', 'git branch -d*']
-protected_branches: []
-# WHY: git itself rejects every push (slp-build adds GIT_CONFIG_* pushInsteadOf=nopush:/// to provider env), so a
-# push hidden behind an alias/script/`git -c` fails too; fetch and commit keep working.
-git_push_block: true
+bash_deny: []
+protected_branches: []   # 2026-11-18 owner decision: push/merge any branch, any repo
+# WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
+env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: []
 deny_tools: [task]

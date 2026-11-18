@@ -1,4 +1,5 @@
-"""hooks/slp-guard.py: Bash allowlists / denies and .slp-only writes, driven by the real roles/*/policy.yaml."""
+"""hooks/slp-guard.py enforcement logic (SLP_GUARD_ENFORCE=1): Bash allowlists / denies and .slp-only writes,
+driven by the locked-policy fixtures; plus the default always-allow behaviour."""
 from __future__ import annotations
 
 import importlib.util
@@ -11,12 +12,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import yaml
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
-from slp_policy import guard_policy  # noqa: E402
+sys.path.insert(0, str(ROOT / "tests"))
+from helpers import locked_guard_policy, locked_guard_tree  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("slp_guard", ROOT / "hooks" / "slp-guard.py")
 guard = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
@@ -24,10 +24,12 @@ spec.loader.exec_module(guard)  # type: ignore[union-attr]
 
 VERIFY = str(ROOT / "bin" / "slp-verify")
 EVIDENCE = str(ROOT / "bin" / "slp-evidence")
+MERGE = str(ROOT / "bin" / "slp-merge")
 
 
 def policy_of(role: str) -> dict:
-    return guard_policy(yaml.safe_load((ROOT / "roles" / role / "policy.yaml").read_text()))
+    """Pre-2026-11-18 locked policies (tests/fixtures/locked_policies): the guard only enforces under SLP_GUARD_ENFORCE=1."""
+    return locked_guard_policy(role)
 
 
 def sh(cwd: Path, *cmd: str) -> None:
@@ -101,6 +103,10 @@ class LeadBashTests(GuardCase):
             f"{EVIDENCE} {self.wt_a}/.slp/slices/s1/review.1.json {self.wt_a}",
             f"{EVIDENCE} {self.wt_a}/.slp/final-review.json {self.wt_a} --base test",
             "slp-verify --init /x",
+            "slp-merge /x --into master",
+            f"{MERGE} {self.wt_a} --into master",
+            f"{MERGE} /x --into develop --push",
+            f"{MERGE} {self.wt_a} --into test --push",
             "git status",
             "git -C /x log --oneline",
             "git diff HEAD~1",
@@ -121,6 +127,9 @@ class LeadBashTests(GuardCase):
             f"sudo {VERIFY} {self.wt_a} s1",
             f"nohup {VERIFY} {self.wt_a} s1",
             f"command {VERIFY} {self.wt_a} s1",
+            f"SLP_X=1 {MERGE} {self.wt_a} --into master",
+            "SLP_X=1 slp-merge /x --into master",
+            f"env GIT_DIR=/x {MERGE} {self.wt_a} --into master",
         ):
             with self.subTest(cmd=cmd):
                 self.bash_no("lead", cmd)
@@ -158,6 +167,15 @@ class LeadBashTests(GuardCase):
             "git branch -D slp/a",
             "git branch -m old new",
             f"{VERIFY} {self.wt_a} s1 --output=/tmp/x",
+            "git merge master",
+            f"{MERGE}x {self.wt_a} --into master",
+            "git push --force origin master",
+            f"git -C {self.main} push",
+            "git commit --allow-empty -m merge",
+            "git add -A",
+            "git add .",
+            "git rebase master",
+            "git pull",
         ):
             with self.subTest(cmd=cmd):
                 self.bash_no("lead", cmd)
@@ -169,9 +187,23 @@ class LeadBashTests(GuardCase):
         self.bash_ok("lead", f"git -C {self.wt_a} merge slp/b", cwd=self.main)
         self.bash_no("lead", f"git -C {self.main} merge slp/b", cwd=self.wt_a)
         self.bash_no("lead", "git merge develop")
+        # ref spellings of protected branches must not slip through (origin/, refs/heads/, ~N)
+        for ref in ("origin/master", "refs/heads/develop", "remotes/origin/test", "origin/develop~1", "'master'"):
+            self.bash_no("lead", f"git merge {ref}")
+            self.bash_no("claude-builder", f"git merge {ref}")
+        self.bash_ok("lead", "git merge slp/b")
         self.bash_no("lead", f"git --git-dir={self.main}/.git merge slp/b", cwd=self.wt_a)
         self.bash_no("lead", f"git --work-tree={self.main} merge slp/b", cwd=self.wt_a)
         self.bash_ok("lead", "git merge slp/b")
+
+    def test_raw_merge_into_master_stays_blocked(self) -> None:
+        main_master = self.tmp / "main-master"
+        init_repo(main_master, "master")
+        sh(main_master, "git", "branch", "feature")
+        self.bash_no("lead", "git merge master", cwd=main_master)
+        self.bash_no("lead", "git merge feature", cwd=main_master)
+        self.bash_no("lead", f"git -C {main_master} merge feature", cwd=self.wt_a)
+        self.bash_ok("lead", f"{MERGE} {self.wt_a} --into master", cwd=main_master)
 
 
 class LeadWriteTests(GuardCase):
@@ -291,9 +323,10 @@ class BuilderBashTests(GuardCase):
 
 class CheckerRoleTests(GuardCase):
     ROLES = ("claude-checker", "claude-final-reviewer", "claude-integration-reviewer")
+    BASH_ROLES = (*ROLES, "claude-advisor")  # the advisor shares the checkers' read-only bash policy
 
     def test_readonly_bash_allowed(self) -> None:
-        for role in self.ROLES:
+        for role in self.BASH_ROLES:
             for cmd in (
                 "git diff base...HEAD", "git diff", "git log --oneline -5", "git show HEAD:src/app.py",
                 "git status", "cat src/app.py", "ls src", "rg merchant_id src", "grep -n x src/app.py",
@@ -303,7 +336,7 @@ class CheckerRoleTests(GuardCase):
                     self.bash_ok(role, cmd)
 
     def test_writes_and_other_commands_blocked(self) -> None:
-        for role in self.ROLES:
+        for role in self.BASH_ROLES:
             for cmd in (
                 "touch x", "rm x", "echo hi", "mkdir d", "cp a b", "mv a b", "sed -i s/a/b/ f", "tee f",
                 "python3 -c 'open(1)'", "git push", "git commit -m x", "git checkout .", "git reset --hard",
@@ -339,10 +372,13 @@ class CheckerRoleTests(GuardCase):
             link.symlink_to(self.wt_a / "src")
         self.write_no("claude-checker", link / "app.py")
 
-    def test_codex_checker_policy_denies_everything(self) -> None:
-        # codex roles are sandboxed by codex itself; the guard policy still refuses if ever consulted
-        self.write_no("codex-checker", self.wt_a / ".slp" / "x.json")
-        self.bash_no("codex-checker", "ls")
+    def test_advisor_writes_nothing_anywhere(self) -> None:
+        # write: none -> not even its own .slp/ (the advisor answers in chat only)
+        for path in (self.wt_a / ".slp" / "x.json", self.wt_a / ".slp" / "slices" / "s1" / "review.1.json",
+                     self.wt_a / "src" / "app.py", self.wt_b / ".slp" / "x.json", "/tmp/slp-evil.json"):  # fmt: skip
+            with self.subTest(path=str(path)):
+                self.write_no("claude-advisor", path)
+        self.write_no("claude-advisor", self.wt_a / ".slp" / "n.ipynb", tool="NotebookEdit")
 
 
 class SupervisorTests(GuardCase):
@@ -352,17 +388,24 @@ class SupervisorTests(GuardCase):
 
 
 class MainEntryTests(GuardCase):
-    """End-to-end through stdin/exit code using the generated build/claude/<role>.policy.json."""
+    """End-to-end through stdin/exit code. ENFORCE runs use a copied hook tree with the locked policies."""
 
-    def run_guard(self, role: str, payload: dict) -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "CLAUDE_PROJECT_DIR": str(self.wt_a)}
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.guard_script = locked_guard_tree(cls.tmp / "guard-tree", ("lead",))
+
+    def run_guard(self, role: str, payload: dict, enforce: bool = True, script: Path | None = None):
+        env = {k: v for k, v in os.environ.items() if k != "SLP_GUARD_ENFORCE"}
+        env["CLAUDE_PROJECT_DIR"] = str(self.wt_a)
+        if enforce:
+            env["SLP_GUARD_ENFORCE"] = "1"
         return subprocess.run(
-            [sys.executable, str(ROOT / "hooks" / "slp-guard.py"), "--role", role],
+            [sys.executable, str(script or self.guard_script), "--role", role],
             input=json.dumps(payload), capture_output=True, text=True, env=env,
         )  # fmt: skip
 
-    @unittest.skipUnless((ROOT / "build" / "claude" / "lead.policy.json").exists(), "run bin/slp-build first")
-    def test_exit_codes(self) -> None:
+    def test_exit_codes_enforced(self) -> None:
         cwd = str(self.wt_a)
         ok = self.run_guard("lead", {"tool_name": "Write", "cwd": cwd, "tool_input": {"file_path": f"{self.wt_b}/.slp/x.md"}})
         self.assertEqual(ok.returncode, 0, ok.stderr)
@@ -371,10 +414,25 @@ class MainEntryTests(GuardCase):
         bash = self.run_guard("lead", {"tool_name": "Bash", "cwd": cwd, "tool_input": {"command": "touch /tmp/x"}})
         self.assertEqual(bash.returncode, 2)
         broken = subprocess.run(
-            [sys.executable, str(ROOT / "hooks" / "slp-guard.py"), "--role", "lead"],
+            [sys.executable, str(self.guard_script), "--role", "lead"],
             input="not json", capture_output=True, text=True,
+            env={**os.environ, "SLP_GUARD_ENFORCE": "1"},
         )  # fmt: skip
         self.assertEqual(broken.returncode, 2)  # fail closed
+
+    def test_default_allows_everything_without_enforce(self) -> None:
+        """Since 2026-11-18: no SLP_GUARD_ENFORCE -> always exit 0, using both the locked tree and the live hook."""
+        cwd = str(self.wt_a)
+        calls = (
+            {"tool_name": "Bash", "cwd": cwd, "tool_input": {"command": "git push --force origin master"}},
+            {"tool_name": "Write", "cwd": cwd, "tool_input": {"file_path": f"{self.wt_b}/src/app.py"}},
+            {"tool_name": "Write", "cwd": cwd, "tool_input": {"file_path": "/tmp/slp-anywhere.txt"}},
+        )
+        for script in (self.guard_script, ROOT / "hooks" / "slp-guard.py"):
+            for payload in calls:
+                with self.subTest(script=str(script), tool=payload["tool_name"]):
+                    res = self.run_guard("lead", payload, enforce=False, script=script)
+                    self.assertEqual(res.returncode, 0, res.stderr)
 
 
 if __name__ == "__main__":

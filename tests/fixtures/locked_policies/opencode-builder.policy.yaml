@@ -1,0 +1,22 @@
+role: opencode-builder
+family: opencode
+provider_id: slp-opencode-builder
+label: "SLP OpenCode Builder"
+description: "SLP peer builder (OpenCode agent slp-builder): edit allowed, bash allowed except git push, task denied, steps capped"
+agent_name: slp-builder     # select with profile modeId = slp-builder (never --agent)
+steps: 80
+write: all
+bash: all-except
+bash_allow: []
+bash_deny: ['git push*', 'git reset --hard*', 'git branch -D*', 'git branch -d*']
+protected_branches: []
+# WHY: git itself rejects every push (slp-build adds GIT_CONFIG_* pushInsteadOf=nopush:/// to provider env), so a
+# push hidden behind an alias/script/`git -c` fails too; fetch and commit keep working.
+git_push_block: true
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: [task]
+probe: {model: "opencode-go/deepseek-v4.1-flash", mode: slp-builder, git_push: true, skip_reason: "opencode quota exhausted", profile: slp-builder-deepseek}
+# WHY: slp-* provider entries are replaced wholesale by slp-build --apply; the model list is user-set, so it lives here.
+models:
+  - {id: "opencode-go/deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash (Go) — FE + BE", isDefault: true}

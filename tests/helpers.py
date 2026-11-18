@@ -14,6 +14,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 VERIFY = ROOT / "bin" / "slp-verify"
 EVIDENCE = ROOT / "bin" / "slp-evidence"
+METRICS = ROOT / "bin" / "slp-metrics"
 
 APP_PY = textwrap.dedent(
     """\
@@ -64,6 +65,8 @@ def brief_text(
         "---",
         f"slice_id: {slice_id}",
         "goal: fixture goal",
+        "constraints: [keep merchant_id filters]",
+        "design_choice: fixture design",
         "files: " + json.dumps(files),
         f"base_ref: {base}",
         "tests_must_pass: []",
@@ -93,6 +96,9 @@ class RepoCase(unittest.TestCase):
         sh(self.repo, "git", "commit", "-q", "-m", "base")
         sh(self.repo, "git", "tag", "base")
         self.config = write(self.tmp, "cfg/fixture.yaml", OK_CONFIG)  # outside the worktree
+
+    def head(self) -> str:
+        return sh(self.repo, "git", "rev-parse", "HEAD").strip()
 
     def commit(self, msg: str = "work") -> None:
         sh(self.repo, "git", "add", "-A")
@@ -128,3 +134,35 @@ class RepoCase(unittest.TestCase):
 
 def check_of(doc: dict[str, Any], name: str) -> dict[str, Any]:
     return next(c for c in doc["checks"] if c["name"] == name)
+
+
+# ---- locked-policy fixtures (pre-2026-11-18 role policies, used to exercise the guard's ENFORCE mode) ----
+LOCKED_DIR = ROOT / "tests" / "fixtures" / "locked_policies"
+
+
+def locked_policy_raw(role: str) -> dict[str, Any]:
+    import yaml
+
+    return yaml.safe_load((LOCKED_DIR / f"{role}.policy.yaml").read_text())
+
+
+def locked_guard_policy(role: str) -> dict[str, Any]:
+    sys.path.insert(0, str(ROOT / "lib"))
+    from slp_policy import guard_policy
+
+    return guard_policy(locked_policy_raw(role))
+
+
+def locked_guard_tree(tmp: Path, roles: tuple[str, ...] = ("lead", "supervisor")) -> Path:
+    """Copy hooks/slp-guard.py into tmp/hooks with tmp/build/claude/<role>.policy.json built from the locked fixtures.
+
+    Returns the script path; run it with SLP_GUARD_ENFORCE=1 to exercise the enforcement logic."""
+    import shutil
+
+    (tmp / "hooks").mkdir(parents=True, exist_ok=True)
+    (tmp / "build" / "claude").mkdir(parents=True, exist_ok=True)
+    script = tmp / "hooks" / "slp-guard.py"
+    shutil.copy(ROOT / "hooks" / "slp-guard.py", script)
+    for role in roles:
+        (tmp / "build" / "claude" / f"{role}.policy.json").write_text(json.dumps(locked_guard_policy(role)))
+    return script

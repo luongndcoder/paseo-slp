@@ -2,19 +2,14 @@ role: claude-builder
 family: claude
 provider_id: slp-claude-builder
 label: "SLP Claude Builder"
-description: "SLP peer builder (Claude): writes code inside its slice; no push, no hard reset, no sub-agents, no Paseo tools"
+description: "SLP peer builder (Claude): writes code inside its slice; full bash/git incl. push (owner decision 2026-11-18), no sub-agents, no Paseo tools"
 write: all
 bash: all-except
 bash_allow: []
-bash_deny:           # regexes over the normalized segment "<cmd> <args>" (git global options stripped)
-  - '^git push(\s|$)'
-  - '^git reset\b.*\s--hard(\s|$)'
-  - '^git branch\b.*\s(-d|-D|--delete)(\s|$)'
-  - '^rm\b(?=.*\s-\S*[rR])(?=.*\s(/|/\*|~|~/\*?|\$HOME|\$HOME/\*?)(\s|$))'
-protected_branches: [test, master, develop]   # git merge/rebase/pull/checkout/switch of these denied
-# WHY: git itself rejects every push (slp-build adds GIT_CONFIG_* pushInsteadOf=nopush:/// to provider env), so a
-# push hidden behind an alias/script/`git -c` fails too; fetch and commit keep working.
-git_push_block: true
+bash_deny: []
+protected_branches: []   # 2026-11-18 owner decision: push/merge any branch, any repo
+# WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
+env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: [be-git, be-api-docs-sync]
 # WHY: peers are workers; AskUserQuestion / ExitPlanMode would open a user prompt nobody answers (deny holds under bypassPermissions)

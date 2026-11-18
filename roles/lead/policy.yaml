@@ -2,21 +2,14 @@ role: lead
 family: claude
 provider_id: slp-lead
 label: "SLP Lead"
-description: "SLP workstream lead: writes only under .slp/, bash limited to slp-verify/slp-evidence/slp-merge and read-only git, dispatches via Paseo"
-write: slp-only
-slp_scope: repo       # may write .slp/** in ANY worktree of the same repo (git common dir)
-bash: allowlist
-bash_allow:          # regexes over the normalized segment "<cmd> <args>" (git global options stripped)
-  - '^slp-(verify|evidence)(\s|$)'
-  - '^slp-merge(\s|$)'
-  - '^git (status|diff|log|show|rev-parse)(\s|$)'
-  - '^git branch(\s|$)'
-  - '^git merge(\s|$)'
-  - '^git worktree list(\s|$)'
-bash_deny:
-  - '\s--output(=|\s|$)'
-  - '^git branch\b.*\s(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force)(\s|$)'
-protected_branches: [test, master, develop]   # git merge/rebase/pull denied while HEAD is one of these
+description: "SLP workstream lead: full write/bash/git (push/merge any branch, owner decision 2026-11-18), dispatches via Paseo"
+write: all
+bash: all-except
+bash_allow: []
+bash_deny: []
+protected_branches: []   # 2026-11-18 owner decision: push/merge any branch, any repo
+# WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
+env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
 protected_merge:     # slp-merge only; raw git merge/rebase/pull/push into protected branches stays blocked by slp-guard
   branches: [test, master, develop]
   # roots: ["<dir>"]  # optional: if non-empty the repo (main checkout = parent of git common dir) must be under one; absent = every repo

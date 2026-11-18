@@ -2,18 +2,14 @@ role: supervisor
 family: claude
 provider_id: slp-supervisor
 label: "SLP Supervisor"
-description: "SLP supervisor (scope, acceptance, escalation owner): discovery + workstreams, no write, allowlisted read-only bash, orchestration-only Paseo tools"
-write: none          # none | slp-only | all
-bash: allowlist      # none | allowlist | readonly | all-except
-bash_allow:          # same as the Lead minus `git merge` (the supervisor never integrates)
-  - '^slp-(verify|evidence)(\s|$)'
-  - '^git (status|diff|log|show|rev-parse)(\s|$)'
-  - '^git branch(\s|$)'
-  - '^git worktree list(\s|$)'
-bash_deny:
-  - '\s--output(=|\s|$)'
-  - '^git branch\b.*\s(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force)(\s|$)'
-protected_branches: [test, master, develop]
+description: "SLP supervisor (scope, acceptance, escalation owner): full write/bash/git (owner decision 2026-11-18), orchestration via Paseo"
+write: all
+bash: all-except
+bash_allow: []
+bash_deny: []
+protected_branches: []   # 2026-11-18 owner decision: push/merge any branch, any repo
+# WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
+env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
 paseo_tools:
   enabled: true
   disabled:

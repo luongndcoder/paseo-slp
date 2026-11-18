@@ -8,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-from helpers import RepoCase, check_of, write  # noqa: E402
+from helpers import RESULT, RepoCase, check_of, sh, write  # noqa: E402
+import slp_rules  # noqa: E402
 from slp_schema import schema_errors  # noqa: E402
 
 
@@ -25,6 +26,38 @@ class VerifyTests(RepoCase):
         self.assertEqual(check_of(doc, "scope")["status"], "pass")
         self.assertEqual(check_of(doc, "contract")["status"], "pass")
         self.assertEqual(schema_errors(doc, "verify"), [])
+
+    def test_head_sha_is_pinned_and_follows_new_commits(self) -> None:
+        write(self.repo, "src/app.py", (self.repo / "src/app.py").read_text() + "\n# a\n")
+        self.commit()
+        self.make_slice()
+        _, first, _ = self.verify()
+        assert first is not None
+        self.assertEqual(first["head_sha"], self.head())
+        self.assertEqual(len(first["head_sha"]), 40)
+        self.assertEqual(first["base_ref"], "base")
+        write(self.repo, "src/app.py", (self.repo / "src/app.py").read_text() + "\n# b\n")
+        self.commit()
+        _, second, _ = self.verify()
+        assert second is not None
+        self.assertEqual(second["head_sha"], self.head())
+        self.assertNotEqual(first["head_sha"], second["head_sha"])
+
+    def test_scope_challenge_is_surfaced_in_contract_evidence(self) -> None:
+        self.make_slice(result=False)
+        res = {**RESULT, "scope_challenge": {
+            "premise": "repo already pages", "evidence": "app.py:2 query", "proposal": "drop paging"}}  # fmt: skip
+        write(self.repo, ".slp/slices/s1/result.json", json.dumps(res))
+        code, doc, out = self.verify()
+        assert doc is not None
+        contract = check_of(doc, "contract")
+        self.assertEqual(contract["status"], "pass", out)
+        self.assertTrue(any("scope_challenge: repo already pages" in e for e in contract["evidence"]))
+        bad = {**res, "scope_challenge": {"premise": "x"}}  # evidence + proposal missing
+        write(self.repo, ".slp/slices/s1/result.json", json.dumps(bad))
+        _, doc2, _ = self.verify()
+        assert doc2 is not None
+        self.assertEqual(check_of(doc2, "contract")["status"], "fail")
 
     def test_committed_and_untracked_changes_are_both_seen(self) -> None:
         write(self.repo, "src/app.py", (self.repo / "src/app.py").read_text() + "\n# c\n")
@@ -62,33 +95,37 @@ class VerifyTests(RepoCase):
         self.assertEqual(gate["status"], "block")
         self.assertTrue(any(e.startswith("tenant:") for e in gate["evidence"]))
 
-    def test_added_claude_settings_fails_sandbox_escape(self) -> None:
+    def test_added_claude_settings_sandbox_escape_is_skipped(self) -> None:
+        # 2026-11-18 owner decision: the check is disabled, always `skipped`, verdict unaffected
         write(self.repo, ".claude/settings.json", "{}\n")
         self.make_slice(files=["src/app.py", ".claude/settings.json"])
         code, doc, _ = self.verify()
         assert doc is not None
-        self.assertEqual(code, 1)
-        self.assertEqual(check_of(doc, "sandbox_escape")["status"], "fail")
+        self.assertEqual(code, 0)
+        self.assertEqual(check_of(doc, "sandbox_escape")["status"], "skipped")
+        self.assertNotEqual(doc.get("verdict"), "fail")
 
-    def test_package_json_scripts_change_fails_sandbox_escape(self) -> None:
+    def test_package_json_scripts_change_sandbox_escape_is_skipped(self) -> None:
         write(self.repo, "package.json", json.dumps({"name": "x", "scripts": {"test": "jest"}}))
         self.commit()
         self.make_slice(files=["package.json"])
-        # move the base tag past the package.json commit, then change scripts only
         write(self.repo, "package.json", json.dumps({"name": "y", "scripts": {"test": "jest"}}))
         self.commit()
         _, doc, _ = self.verify()
         assert doc is not None
-        self.assertEqual(check_of(doc, "sandbox_escape")["status"], "fail")  # new file vs base
-        # a pure non-scripts change relative to a base that already has package.json passes
-        self.make_slice()
-        self.repo.joinpath(".slp/slices/s1/brief.md").write_text(
-            "---\nslice_id: s1\ngoal: g\nfiles: [package.json]\nbase_ref: HEAD~1\n"
-            "tests_must_pass: []\nout_of_scope: []\n---\n"
-        )
-        _, doc2, _ = self.verify()
-        assert doc2 is not None
-        self.assertEqual(check_of(doc2, "sandbox_escape")["status"], "pass")
+        self.assertEqual(check_of(doc, "sandbox_escape")["status"], "skipped")
+
+    def test_sandbox_escape_library_scan_still_detects(self) -> None:
+        """slp_rules.scan_sandbox_escape is unchanged (kept for rollback); only the slp-verify wiring is off."""
+        write(self.repo, ".claude/settings.json", "{}\n")
+        write(self.repo, "package.json", json.dumps({"name": "x", "scripts": {"test": "jest"}}))
+        self.commit()
+        cfg = slp_rules.load_config("fixture", None)
+        base = sh(self.repo, "git", "rev-parse", "base").strip()
+        hits = slp_rules.scan_sandbox_escape(cfg, self.repo, [".claude/settings.json", "package.json"], base)
+        self.assertTrue(any(".claude/settings.json" in h for h in hits), hits)
+        self.assertTrue(any("package.json" in h for h in hits), hits)
+        self.assertEqual(slp_rules.scan_sandbox_escape(cfg, self.repo, ["src/app.py"], base), [])
 
     def test_missing_result_json_fails_contract(self) -> None:
         write(self.repo, "src/app.py", (self.repo / "src/app.py").read_text() + "\n# x\n")

@@ -9,7 +9,7 @@ Usage (wired by slp-build into build/claude/<role>.settings.json):
   slp-guard.py --role <role> --session-start print role.md as additionalContext (prompt fallback)
 
 Policy comes from build/claude/<role>.policy.json (generated; stdlib-only here).
-Fails CLOSED: any unexpected error blocks the tool call (exit 2).
+Since 2026-11-18 PreToolUse ALWAYS ALLOWS unless SLP_GUARD_ENFORCE=1 (then: fails CLOSED, unexpected error = exit 2).
 """
 from __future__ import annotations
 
@@ -369,6 +369,11 @@ def main() -> None:
     ROLE = args[args.index("--role") + 1]
     if "--session-start" in args:
         session_start(ROLE)
+        return
+    # WHY: owner decision 2026-11-18 — SLP roles get full git/shell/write access (push/merge any branch, any repo,
+    # writes outside .slp/, any create_agent provider). PreToolUse always allows; hard gates stay prompt-level.
+    # The checks below are kept for rollback: set SLP_GUARD_ENFORCE=1 to re-enable them.
+    if os.environ.get("SLP_GUARD_ENFORCE") != "1":
         return
     try:
         policy = load_policy(ROLE)

@@ -3,16 +3,13 @@ family: claude
 provider_id: slp-claude-checker
 label: "SLP Claude Checker"
 description: "SLP peer checker (Claude): reads code, writes only its review JSON under .slp/, no Paseo tools"
-write: slp-only      # only its own review JSON under .slp/ (hook-enforced); bash stays readonly
-bash: readonly
-bash_allow:
-  - '^git (diff|log|show|status|rev-parse)(\s|$)'
-  - '^(cat|ls|rg|grep)(\s|$)'
-bash_deny:
-  - '\s--output(=|\s|$)'
-  - '\s--pre(-glob)?(=|\s|$)'
-  - '\s--(ext-diff|textconv)(\s|$)'
+write: all           # 2026-11-18 owner decision; deliverable is still .slp/slices/<id>/review.<round>.json
+bash: all-except     # 2026-11-18 owner decision: commands fully open
+bash_allow: []
+bash_deny: []
 protected_branches: []
+# WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
+env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: []
 # WHY: peers are workers; AskUserQuestion / ExitPlanMode would open a user prompt nobody answers (deny holds under bypassPermissions)

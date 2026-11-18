@@ -8,10 +8,9 @@ write: all
 bash: all   # run_command is needed for tests; agy cannot restrict commands or write paths
 bash_allow: []
 bash_deny: []
-# WHY: agy has `run_command` + --dangerously-skip-permissions; the git-level push block (provider env GIT_CONFIG_*)
-# is merged into the `antigravity` override's env (plugin provider spawns agy with the provider env:
-# plugin-provider.ts resolveLaunch -> antigravity-provider/server/internal/process.ts startDriver).
-git_push_block: true
+# WHY: global ~/.claude git-flow-guard hard-blocks commit/merge on master; soft = advisory, SLP agents only (2026-11-18)
+env: {MOBIO_GITFLOW_GUARD_MODE: soft, MOBIO_ALLOW_FORCE_PUSH: "1"}   # force-push escape in global forbidden-actions/destructive-guard
+# 2026-11-18 owner decision: git push allowed (no GIT_CONFIG_* push block)
 # allowlist names; NOTE init.tools lists the full catalog and `command_status` is rejected by the allowlist
 # registry ("tool not found in registry" = agent fails to start). Re-run conformance after any change (names drift)
 agy_tools: [view_file, list_dir, grep_search, find_by_name, write_to_file, replace_file_content, multi_replace_file_content, run_command]
