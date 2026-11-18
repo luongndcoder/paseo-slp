@@ -17,5 +17,6 @@ protected_branches: [test, master, develop]   # git merge/rebase/pull/checkout/s
 git_push_block: true
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: [be-git, be-api-docs-sync]
-deny_tools: [Agent, Task, NotebookEdit]
-probe: {model: claude-haiku-5-5, mode: bypassPermissions, git_push: true}
+# WHY: peers are workers; AskUserQuestion / ExitPlanMode would open a user prompt nobody answers (deny holds under bypassPermissions)
+deny_tools: [Agent, Task, NotebookEdit, AskUserQuestion, ExitPlanMode]
+probe: {model: claude-haiku-5-5, mode: bypassPermissions, git_push: true, tools_probe: true, profile: slp-builder-sonnet}

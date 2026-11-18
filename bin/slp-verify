@@ -6,7 +6,7 @@
 
 Reads .slp/slices/<id>/brief.md front-matter, runs test/lint/typecheck from the repo config and
 the scope / writer_conflict / hard_gate / sandbox_escape / contract checks, writes
-.slp/slices/<id>/verify.<round>.json.  Exit: 0 pass, 1 fail, 3 block, 2 usage/internal error.
+.slp/slices/<id>/verify.<round>.json (pins `head_sha`, the full SHA of the verified HEAD).  Exit: 0 pass, 1 fail, 3 block, 2 usage/internal error.
 """
 from __future__ import annotations
 
@@ -134,7 +134,11 @@ def check_contract(slp_root: Path, slice_id: str) -> dict[str, Any]:
         errors = [f"slice_id {data['slice_id']!r} != {slice_id!r}"]
     if errors:
         return check("contract", "fail", errors)
-    return check("contract", "pass", [f"result.json valid (status={data['status']})"])
+    evidence = [f"result.json valid (status={data['status']})"]
+    challenge = data.get("scope_challenge")
+    if challenge:  # surface it: the Lead must evaluate it before the next round
+        evidence.append("scope_challenge: " + " ".join(challenge["premise"].split())[:200])
+    return check("contract", "pass", evidence)
 
 
 def overall(checks: list[dict[str, Any]]) -> str:
@@ -182,6 +186,7 @@ def verify(args: argparse.Namespace) -> int:
 
     base = brief["base_ref"]
     slp_git.git(worktree, "rev-parse", "--verify", f"{base}^{{commit}}")  # fail early
+    head_sha = slp_git.head_sha(worktree)  # version pin: this verify is valid for this SHA only
     changed = slp_git.changed_files(worktree, base)  # snapshot BEFORE commands add artifacts
     lines = slp_git.diff_lines(worktree, base)
 
@@ -210,6 +215,7 @@ def verify(args: argparse.Namespace) -> int:
         "round": rnd,
         "verdict": verdict,
         "base_ref": base,
+        "head_sha": head_sha,
         "repo": {"name": name, "config": str(cfg_path) if cfg_path else None},
         "changed_files": changed,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -221,6 +227,7 @@ def verify(args: argparse.Namespace) -> int:
     out = slice_dir / f"verify.{rnd}.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"slp-verify {args.slice_id} round {rnd}: {verdict.upper()}  ({out})")
+    print(f"  head_sha         {head_sha}  (valid for this commit only; re-verify after any new commit)")
     for c in checks:
         first = c["evidence"][0] if c["evidence"] else ""
         print(f"  {c['name']:16} {c['status']:13} {first[:110]}")

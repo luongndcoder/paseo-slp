@@ -1,0 +1,12 @@
+repo: momir-frontend
+
+commands:
+  test:
+    cmd: "npm install --no-audit --no-fund && npm run test"
+    timeout: 1200
+  lint:
+    cmd: "npm run lint"
+    timeout: 600
+  typecheck:
+    cmd: "npm run typecheck"
+    timeout: 600

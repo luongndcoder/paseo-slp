@@ -1,0 +1,139 @@
+#!/Users/luongcoder/.claude/skills/.venv/bin/python3
+"""Write build/skills-inventory.md: one row per skill, one column per coding agent.
+
+Reads the live skill dirs each agent loads (Claude, Codex, OpenCode, Pi, Antigravity) and
+Claude's skillOverrides. Read-only except for the output file.
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from pathlib import Path
+
+H = Path.home()
+OUT = Path(__file__).resolve().parent.parent / "build" / "skills-inventory.md"
+
+
+def front(d: Path) -> str:
+    try:
+        t = (d / "SKILL.md").read_text(errors="replace")
+    except OSError:
+        return ""
+    return t.split("---", 2)[1] if t.startswith("---") else ""
+
+
+def meta(d: Path) -> tuple[str, bool]:
+    """(short description, manual flag) parsed with regex: some frontmatter is not valid YAML."""
+    fm = front(d)
+    manual = bool(re.search(r"^disable-model-invocation:\s*true\s*$", fm, re.M))
+    m = re.search(r"^description:\s*(.+?)(?=^\S[\w-]*:|\Z)", fm, re.M | re.S)
+    desc = re.sub(r"\s+", " ", m.group(1)).strip().strip("'\"|>") if m else ""
+    desc = re.split(r"(?<=[.!?])\s", desc)[0]
+    return (desc[:70] + "…" if len(desc) > 70 else desc), manual
+
+
+def skills(d: Path) -> dict[str, Path]:
+    found: dict[str, Path] = {}
+    if not d.is_dir():
+        return found
+    for p in d.iterdir():
+        if p.name.startswith("."):
+            continue
+        if (p / "SKILL.md").exists():
+            found[p.name] = p
+    return found
+
+
+def main() -> None:
+    ov = json.load(open(H / ".claude/settings.json")).get("skillOverrides", {})
+    cl = skills(H / ".claude/skills")
+    ag = skills(H / ".agents/skills")
+    cx = skills(H / ".codex/skills") | skills(H / ".codex/skills/.system")
+    oc = skills(H / ".config/opencode/skills")
+    agy = (
+        skills(H / ".gemini/config/skills")
+        | skills(H / ".gemini/antigravity-cli/builtin/skills")
+        | skills(H / ".agent/skills")
+    )
+    pi_pkg = skills(H / ".pi/agent/npm/node_modules/pi-subagents/skills")
+    builtin = skills(H / ".gemini/antigravity-cli/builtin/skills")
+    agents = {
+        "Claude": cl,
+        "Codex": ag | cx,
+        "OpenCode": ag | oc | cl,
+        "Pi": ag | pi_pkg,
+        "Antigravity": agy,
+    }
+    root_lark = {n for n, p in ag.items() if n.startswith("lark-") and p.lstat().st_uid == 0}
+
+    def claude_mark(n: str) -> str:
+        if n not in cl:
+            return ""
+        manual = ov.get(n) in ("user-invocable-only", "off") or meta(cl[n])[1]
+        return "🔒" if manual else "⚡"
+
+    def group(n: str) -> str:
+        for prefix, g in (("slp-", "SLP (Paseo)"), ("paseo", "Paseo"), ("be-", "Mobio backend (be-*)"),
+                          ("lark-", "Lark")):  # fmt: skip
+            if n.startswith(prefix):
+                return g
+        return "Antigravity built-in" if n in builtin else "Khác"
+
+    stamp = subprocess.run(["date", "+%F %H:%M"], capture_output=True, text=True).stdout.strip()
+    src = {
+        "Claude": "~/.claude/skills",
+        "Codex": "~/.agents/skills + ~/.codex/skills",
+        "OpenCode": "~/.agents/skills + ~/.config/opencode/skills + ~/.claude/skills",
+        "Pi": "~/.agents/skills + package pi-subagents",
+        "Antigravity": "~/.gemini/config/skills + built-in + ~/.agent/skills",
+    }
+    lines = [
+        f"# Skill trên các coding agent — cập nhật {stamp}",
+        "",
+        "**Cách đọc:** mỗi dòng 1 skill, mỗi cột 1 agent. ⚡ = Claude tự kích hoạt · 🔒 = Claude chỉ gọi tay "
+        "(`/tên`) · ✓ = agent nạp skill này (Codex/OpenCode/Pi/Antigravity không có chế độ gọi tay) · trống = không có.",
+        "",
+        "## Tổng quan",
+        "",
+        "| Agent | Số skill | Đọc từ |",
+        "|---|---|---|",
+    ]
+    lines += [f"| {a} | {len(s)} | `{src[a]}` |" for a, s in agents.items()]
+    auto = sum(1 for n in cl if claude_mark(n) == "⚡")
+    lines.append(f"\nClaude: **{auto} tự kích hoạt**, {len(cl) - auto} gọi tay.")
+    if root_lark:
+        lines.append(
+            f"\n> ⏳ {len(root_lark)} skill `lark-*` trong `~/.agents/skills` chờ xoá: "
+            "`sudo rm -rf ~/.agents/skills/lark-*` (Claude có bản riêng)."
+        )
+    groups: dict[str, list[str]] = {}
+    for n in sorted(set().union(*agents.values())):
+        groups.setdefault(group(n), []).append(n)
+    for g in ("SLP (Paseo)", "Paseo", "Mobio backend (be-*)", "Lark", "Khác", "Antigravity built-in"):
+        if g not in groups:
+            continue
+        lines += ["", f"## {g} ({len(groups[g])})", "",
+                  "| Skill | Claude | Codex | OpenCode | Pi | Antigravity | Mô tả |",
+                  "|---|:-:|:-:|:-:|:-:|:-:|---|"]  # fmt: skip
+        for n in groups[g]:
+            d = next(agents[a][n] for a in agents if n in agents[a])
+            desc = ("⏳ chờ sudo · " if n in root_lark else "") + meta(d)[0]
+            cells = [claude_mark(n)] + [
+                "✓" if n in agents[a] else "" for a in ("Codex", "OpenCode", "Pi", "Antigravity")
+            ]
+            lines.append(f"| `{n}` | " + " | ".join(cells) + f" | {desc} |")
+    try:
+        out = subprocess.run(["agy", "plugin", "list"], capture_output=True, text=True, timeout=60).stdout
+        plugins = re.findall(r"- (\S+) \((\w+)[^)]*\)\s*\n\s*Components: (\d+) skill", out)
+    except (OSError, subprocess.SubprocessError):
+        plugins = []
+    if plugins:
+        lines += ["", "## Plugin của Antigravity", "", "| Plugin | Trạng thái | Số skill |", "|---|---|---|"]
+        lines += [f"| `{a}` | {b} | {c} |" for a, b, c in plugins]
+    OUT.write_text("\n".join(lines) + "\n")
+    print(OUT)
+
+
+if __name__ == "__main__":
+    main()

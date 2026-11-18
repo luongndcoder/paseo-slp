@@ -3,7 +3,8 @@
 
 Default is a dry run (writes build/ and prints the providers JSON + a diff vs the live config).
 --apply additionally writes ONLY the agents.providers.slp-* keys of ~/.paseo/config.json
-and runs `paseo reload`.
+(adding/replacing one per role, REMOVING any slp-* key that has no role any more; the antigravity override is
+merged field by field) and runs `paseo reload`.
 """
 from __future__ import annotations
 
@@ -34,16 +35,22 @@ import slp_skills_install  # noqa: E402
 ROLES_DIR = ROOT / "roles"
 BUILD_DIR = ROOT / "build"
 GUARD = ROOT / "hooks" / "slp-guard.py"
+# WHY a wrapper instead of `claude --settings <role.json>`: Paseo passes its own `--settings` (fastMode, ...) to the SDK
+# for fast-mode models (Opus), emitted AFTER the provider argv, which shadows ours. bin/slp-claude merges them; see README.
+SLP_CLAUDE = ROOT / "bin" / "slp-claude"
 PY = str(_VENV_PY) if _VENV_PY.is_file() else sys.executable
 SKILLS_DIR = Path.home() / ".claude" / "skills"
 CONFIG = Path.home() / ".paseo" / "config.json"
 # One rolling copy of the config as it was right before the last --apply (rollback aid).
 # Lives in build/ (gitignored) and is overwritten each time, so nothing piles up in /tmp.
-CONFIG_BACKUP = ROOT / "build" / "config-before-apply.json"
 SETTINGS = Path.home() / ".claude" / "settings.json"
 SKILLS_SRC = ROOT / "skills"
 PREFIX = "slp-"
 MAX_ROLE_LINES = 60
+# Paseo MCP tools slp-guard polices for roles with a `spawn_allow` policy (Claude sees them as mcp__<server>__<tool>;
+# the daemon names its injected MCP server "paseo", runtime-mcp-config.ts PASEO_MCP_SERVER_NAME).
+SPAWN_TOOLS = ("create_agent", "update_agent", "set_agent_mode", "send_agent_prompt")
+SPAWN_MATCHER = "|".join(f"mcp__paseo__{t}" for t in SPAWN_TOOLS)
 
 BROWSER_TOOLS = [
     "back", "click", "close_tab", "drag", "evaluate", "fill", "forward", "hover", "keypress",
@@ -68,6 +75,19 @@ def load_roles() -> dict[str, dict[str, Any]]:
             sys.exit(f"{pol.parent}/role.md: more than {MAX_ROLE_LINES} lines")
         if policy["role"] != pol.parent.name:
             sys.exit(f"{pol}: role does not match directory")
+        allow = policy.get("spawn_allow")
+        if "spawn_allow" in policy and not (
+            isinstance(allow, list) and allow and all(isinstance(a, str) and a for a in allow)
+        ):
+            sys.exit(f"{pol}: spawn_allow must be a non-empty list of provider ids")
+        if "protected_merge" in policy:
+            pm = policy["protected_merge"]
+            lists_ok = isinstance(pm, dict) and all(
+                isinstance(pm.get(k) or [], list) and all(isinstance(v, str) and v for v in pm.get(k) or [])
+                for k in ("branches", "roots", "deny_roots")  # roots / deny_roots optional: absent or empty
+            )
+            if not (lists_ok and pm.get("branches") and isinstance(pm.get("push", False), bool)):
+                sys.exit(f"{pol}: protected_merge needs non-empty `branches`, optional string lists `roots`/`deny_roots`, bool `push`")
         policy["_role_md"] = role_md.rstrip("\n") + "\n"
         policy["_role_md_path"] = str(pol.parent / "role.md")
         roles[policy["role"]] = policy
@@ -116,6 +136,29 @@ def provider_env(policy: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+def add_models(provider: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    """Copy the optional policy `models` list ({id, label, isDefault}) into the provider entry.
+
+    WHY: slp-* provider entries are replaced wholesale on --apply, so a user-set `models` list would be dropped.
+    """
+    if "models" not in policy:
+        return provider
+    models = policy["models"]
+    ok = isinstance(models, list) and models
+    for m in models if ok else []:
+        ok = ok and isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]
+        ok = ok and isinstance(m.get("label"), str) and m["label"]
+        ok = ok and set(m) <= {"id", "label", "isDefault"} and isinstance(m.get("isDefault", False), bool)
+    if not ok or sum(1 for m in models if m.get("isDefault")) > 1:
+        sys.exit(f"{policy['role']}: models must be a non-empty list of {{id, label, isDefault?}} with at most one default")
+    # WHY: Paseo treats `models` as a replacement list, and when the provider manifest has static modes it then skips
+    # the runtime catalog entirely (provider-registry fetchCatalog). For OpenCode that hides our agents (slp-builder,
+    # slp-checker) behind the static build/plan modes; `additionalModels` keeps runtime discovery of modes.
+    key = "additionalModels" if policy["family"] == "opencode" else "models"
+    provider[key] = [dict(m) for m in models]
+    return provider
+
+
 def add_env(provider: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
     env = provider_env(policy)
     if env:
@@ -149,6 +192,8 @@ def claude_artifacts(policy: dict[str, Any], skills: list[str]) -> tuple[dict, d
                 "hooks": [{"type": "command", "command": pre_cmd, "timeout": 20}],
             }
         )
+    if "spawn_allow" in policy:
+        pre.append({"matcher": SPAWN_MATCHER, "hooks": [{"type": "command", "command": pre_cmd, "timeout": 20}]})
     hooks: dict[str, Any] = {
         "SessionStart": [
             {"hooks": [{"type": "command", "command": f"{guard_cmd} --session-start"}]}
@@ -174,8 +219,8 @@ def claude_artifacts(policy: dict[str, Any], skills: list[str]) -> tuple[dict, d
         "label": policy["label"],
         "description": policy["description"],
         "command": [
-            "claude",
-            "--settings",
+            str(SLP_CLAUDE),
+            "--slp-role-settings",
             str(settings_path),
             "--append-system-prompt",
             policy["_role_md"],
@@ -185,78 +230,36 @@ def claude_artifacts(policy: dict[str, Any], skills: list[str]) -> tuple[dict, d
     return settings, guard_policy, provider
 
 
-# ---------------------------------------------------------------- codex
-def toml_basic_string(text: str) -> str:
-    esc = text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
-    return f'"{esc}"'
-
-
-def codex_catalog_no_multi_agent() -> Path:
-    """build/codex/catalog.json = `codex debug models` with multi_agent_version/_reasoning_effort stripped.
-
-    WHY: the per-model catalog field `multi_agent_version: v2` (gpt-6-*, gpt-5.6-sol/terra) injects the
-    collaboration.spawn_agent tools + <multi_agent_role> prompt regardless of `features.multi_agent*`
-    (verified with `codex debug prompt-input`). With the field absent the legacy `features.multi_agent`
-    flag decides again, so `-c features.multi_agent=false` works. Regenerated on every build so new
-    models are not lost; falls back to the bundled catalog when the refresh fails.
-    """
-    out = BUILD_DIR / "codex" / "catalog.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    for extra in ([], ["--bundled"]):
-        res = subprocess.run(["codex", "debug", "models", *extra], capture_output=True, text=True, timeout=90)
-        try:
-            data = json.loads(res.stdout)
-            models = data["models"]
-        except (ValueError, KeyError, TypeError):
-            continue
-        for m in models:
-            m.pop("multi_agent_version", None)
-            m.pop("multi_agent_reasoning_effort", None)
-        out.write_text(json.dumps(data))
-        return out
-    sys.exit("codex debug models failed; cannot build the no-multi-agent catalog")
-
-
-def codex_provider(policy: dict[str, Any]) -> dict[str, Any]:
-    catalog = codex_catalog_no_multi_agent()
-    # Paseo sends its own developerInstructions on thread/start, which overrides the
-    # developer_instructions config key; model_instructions_file replaces the base
-    # instructions instead and is not touched by Paseo.
-    return {
-        "extends": "codex",
-        "label": policy["label"],
-        "description": policy["description"],
-        "command": [
-            "codex",
-            "-c",
-            'sandbox_mode="read-only"',
-            "-c",
-            'approval_policy="never"',
-            # WHY: peers must not fan out. `features.multi_agent` (stable, default on; ~/.codex/config.toml
-            # sets it true) is the flag behind spawn_agent/send_message/wait/...; `-c` beats the user config.
-            "-c",
-            "features.multi_agent=false",
-            "-c",
-            "features.multi_agent_v2=false",
-            "-c",
-            f"model_catalog_json={toml_basic_string(str(catalog))}",
-            "-c",
-            f"developer_instructions={toml_basic_string(policy['_role_md'])}",
-            "-c",
-            f"model_instructions_file={toml_basic_string(policy['_role_md_path'])}",
-        ],
-        "paseoTools": paseo_tools(policy),
-    }
-
-
 # ---------------------------------------------------------------- opencode
+def opencode_bash_rules(policy: dict[str, Any]) -> dict[str, str]:
+    """OpenCode `permission.bash` map. The LAST matching rule wins, so the order is load-bearing:
+    catch-all first, then (allowlist only) the allows, then the denies, then the git push block (see opencode_provider).
+
+    bash all/all-except: `"*": allow` + `bash_deny` globs.  bash allowlist: `"*": deny` + `bash_allow` globs + `bash_deny`
+    globs (deny-by-default).  bash none: `"*": deny`.  For OpenCode roles bash_allow/bash_deny are globs, not the regexes
+    the Claude guard uses.
+    """
+    mode = policy["bash"]
+    if mode in ("none", "allowlist"):
+        rules: dict[str, str] = {"*": "deny"}
+        if mode == "allowlist":
+            for pat in policy.get("bash_allow", []):
+                rules[pat] = "allow"
+    elif mode in ("all", "all-except"):
+        rules = {"*": "allow"}
+    else:
+        sys.exit(f"{policy['role']}: unsupported bash mode {mode!r} for an OpenCode role")
+    for pat in policy.get("bash_deny", []):
+        rules.pop(pat, None)  # re-insert at the end: a deny must come after every allow it should override
+        rules[pat] = "deny"
+    return rules
+
+
 def opencode_provider(policy: dict[str, Any]) -> dict[str, Any]:
     # WHY: Paseo 0.11.2 runs ONE shared `opencode serve` and ignores per-provider
     # OPENCODE_CONFIG_CONTENT for mode discovery, so the agent is installed globally as
     # ~/.config/opencode/agents/<agent_name>.md (on --apply) and selected via profile modeId.
-    bash_rules: dict[str, str] = {"*": "allow"}
-    for pat in policy.get("bash_deny", []):  # last matching rule wins in OpenCode
-        bash_rules[pat] = "deny"
+    bash_rules = opencode_bash_rules(policy)
     if policy.get("git_push_block"):
         # WHY: the git-level block (provider env GIT_CONFIG_*) only reaches the shared `opencode serve` when this
         # provider happened to construct the process-wide OpenCodeServerManager first (server-manager.ts:120-138,
@@ -294,12 +297,20 @@ def opencode_provider(policy: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- pi
+def pi_tool_args(policy: dict[str, Any]) -> list[str]:
+    """`--exclude-tools a,b,c` (name/glob denylist that also applies to MCP tools; NOT --no-mcp)."""
+    excl = [str(x) for x in policy.get("pi_exclude_tools") or []]
+    if any("," in x or not x.strip() for x in excl):
+        sys.exit(f"{policy['role']}: pi_exclude_tools entries must be non-empty and comma-free")
+    return ["--exclude-tools", ",".join(excl)] if excl else []
+
+
 def pi_provider(policy: dict[str, Any]) -> dict[str, Any]:
     return {
         "extends": "pi",
         "label": policy["label"],
         "description": policy["description"],
-        "command": ["pi", "--append-system-prompt", policy["_role_md_path"]],
+        "command": ["pi", "--append-system-prompt", policy["_role_md_path"], *pi_tool_args(policy)],
         "paseoTools": paseo_tools(policy),
     }
 
@@ -311,9 +322,10 @@ AGY_AGENTS_DIR = Path.home() / ".gemini" / "config" / "agents"
 # built-in plugin provider key itself (an entry without `extends` is an override; verified on a throw-away
 # 0.11.2 daemon: spawned argv = `agy --agent slp-agy-builder <paseo flags>`). Accepted by the coordinator:
 # EVERY Antigravity agent started via Paseo becomes the SLP builder. This is the ONLY non-slp key slp-build
-# writes, and only its command / paseoTools / label fields are merged (anything else under the key is kept).
+# writes, and only its command / paseoTools / label / env fields are merged (anything else under the key is kept;
+# env is merged key by key, GIT_CONFIG_* pairs through slp_git_push_block).
 PLAIN_OVERRIDE_KEYS = {"antigravity"}
-OVERRIDE_FIELDS = ("command", "paseoTools", "label")
+OVERRIDE_FIELDS = ("command", "paseoTools", "label", "env")
 
 
 def antigravity_agent(policy: dict[str, Any]) -> Path:
@@ -362,6 +374,11 @@ def install_antigravity() -> None:
 def generate() -> dict[str, dict[str, Any]]:
     roles = load_roles()
     skills = all_skill_names()
+    known = {pol["provider_id"] for pol in roles.values()}
+    for role, policy in roles.items():
+        unknown = sorted(set(policy.get("spawn_allow") or []) - known)
+        if unknown:
+            sys.exit(f"{role}: spawn_allow names unknown provider ids {unknown}")
     providers: dict[str, dict[str, Any]] = {}
     (BUILD_DIR / "claude").mkdir(parents=True, exist_ok=True)
     for role, policy in roles.items():
@@ -374,8 +391,6 @@ def generate() -> dict[str, dict[str, Any]]:
             (BUILD_DIR / "claude" / f"{role}.policy.json").write_text(
                 json.dumps(guard_policy, indent=2) + "\n"
             )
-        elif fam == "codex":
-            provider = codex_provider(policy)
         elif fam == "opencode":
             provider = opencode_provider(policy)
         elif fam == "pi":
@@ -390,8 +405,8 @@ def generate() -> dict[str, dict[str, Any]]:
                 provider["label"] = policy["override_label"]
         else:
             sys.exit(f"{role}: unsupported family {fam}")
-        if fam != "antigravity":  # the antigravity override only ever merges command/paseoTools/label
-            add_env(provider, policy)
+        add_models(provider, policy)
+        add_env(provider, policy)  # antigravity: merged into the live override by merge_override_env
         pid = policy["provider_id"]
         if not (pid.startswith(PREFIX) or (fam == "antigravity" and pid in PLAIN_OVERRIDE_KEYS)):
             sys.exit(f"{role}: provider_id must start with {PREFIX}")
@@ -404,28 +419,60 @@ def dump_config(cfg: dict[str, Any]) -> str:
     return json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
 
 
-def merged_config(providers: dict[str, dict[str, Any]]) -> tuple[str, str, list[str]]:
+def merge_override_env(existing: dict[str, str] | None, wanted: dict[str, str]) -> dict[str, str]:
+    """Env of a built-in override we do not own: keep every existing key, add ours (idempotent).
+
+    GIT_CONFIG_* pairs are merged through slp_git_push_block so a user's own pairs survive and ours are never
+    duplicated; any other wanted key overwrites the existing value.
+    """
+    plain = {k: v for k, v in wanted.items() if not k.startswith("GIT_CONFIG_")}
+    merged = {**(existing or {}), **plain}
+    if any(k.startswith("GIT_CONFIG_") for k in wanted):
+        merged = slp_git_push_block.with_push_block(merged)
+    return merged
+
+
+def align_order(new: Any, old: Any) -> Any:
+    """`new` with dict keys ordered like `old` (new keys last) so key-order-only differences never show in the diff."""
+    if isinstance(new, dict) and isinstance(old, dict):
+        keys = [k for k in old if k in new] + [k for k in new if k not in old]
+        return {k: align_order(new[k], old.get(k)) for k in keys}
+    return new
+
+
+def merged_config(
+    providers: dict[str, dict[str, Any]], only_claude: bool = False
+) -> tuple[str, str, list[str]]:
     current_text = CONFIG.read_text()
     cfg = json.loads(current_text)
     live = cfg.setdefault("agents", {}).setdefault("providers", {})
+    # slp-* keys whose role is gone (e.g. a deleted role dir); removed below unless --only-claude
     stale = [k for k in live if k.startswith(PREFIX) and k not in providers]
+    if only_claude:  # narrow the write to `extends: claude` providers; the rest of the config stays untouched
+        providers = {k: v for k, v in providers.items() if v.get("extends") == "claude"}
+    else:
+        for key in stale:
+            del live[key]
     for key, value in providers.items():
         if key in PLAIN_OVERRIDE_KEYS:  # merge only the owned fields of the built-in override
             entry = live.setdefault(key, {})
-            entry.update({f: value[f] for f in OVERRIDE_FIELDS if f in value})
+            entry.update({f: value[f] for f in OVERRIDE_FIELDS if f in value and f != "env"})
+            if value.get("env"):
+                entry["env"] = merge_override_env(entry.get("env"), value["env"])
         else:
-            live[key] = value  # slp-* keys are replaced wholesale
+            live[key] = align_order(value, live.get(key))  # slp-* keys are replaced wholesale
     return current_text, dump_config(cfg), stale
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="write slp-* providers + paseo reload")
+    ap.add_argument("--only-claude", action="store_true", help="write only the Claude-family slp-* providers")
     ap.add_argument("--quiet", action="store_true", help="do not print providers JSON")
     args = ap.parse_args()
 
     providers = generate()
-    current, new, stale = merged_config(providers)
+    current, new, stale = merged_config(providers, args.only_claude)
     if not args.quiet:
         print(json.dumps(providers, indent=2, ensure_ascii=False))
     diff = "".join(
@@ -435,8 +482,10 @@ def main() -> None:
     )
     print("\n=== diff vs current ~/.paseo/config.json ===")
     print(diff or "(no changes)")
-    if stale:
-        print(f"note: stale slp-* providers left untouched: {stale}")
+    if stale and args.only_claude:
+        print(f"note: stale slp-* providers left untouched (--only-claude): {stale}")
+    elif stale:
+        print(f"stale slp-* providers (no role) {'removed' if args.apply else 'to be removed on --apply'}: {stale}")
     print("\n=== skills (~/.claude/skills symlinks + ~/.claude/settings.json) ===")
     print("\n".join(slp_skills_install.install_symlinks(SKILLS_SRC, SKILLS_DIR, apply=False)) or "(no slp-* skills)")
     sdiff, schanged = slp_skills_install.ensure_overrides(SETTINGS, apply=False)
@@ -454,12 +503,9 @@ def main() -> None:
         print(line)
     sdiff, schanged = slp_skills_install.ensure_overrides(SETTINGS, apply=True)
     print(f"settings.json skillOverrides {'updated' if schanged else 'already set'}: {SETTINGS}")
-    if diff:  # only back up when something changes, so an idempotent re-apply never clobbers the real "before" copy
-        CONFIG_BACKUP.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(CONFIG, CONFIG_BACKUP)
-        print(f"backup: {CONFIG_BACKUP}")
+    if diff:  # no backup by user decision (2026-10-28): the dry-run diff is the review step
         # re-read right before writing to minimise clobbering concurrent edits (zerosub rotation)
-        current, new, _ = merged_config(providers)
+        current, new, _ = merged_config(providers, args.only_claude)
         CONFIG.write_text(new)
         print(f"wrote {CONFIG}")
     subprocess.run([slp_paseo.resolve_cli(), "reload"], check=False)

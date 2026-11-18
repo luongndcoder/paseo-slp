@@ -8,12 +8,16 @@ write: all
 bash: all   # run_command is needed for tests; agy cannot restrict commands or write paths
 bash_allow: []
 bash_deny: []
+# WHY: agy has `run_command` + --dangerously-skip-permissions; the git-level push block (provider env GIT_CONFIG_*)
+# is merged into the `antigravity` override's env (plugin provider spawns agy with the provider env:
+# plugin-provider.ts resolveLaunch -> antigravity-provider/server/internal/process.ts startDriver).
+git_push_block: true
 # allowlist names; NOTE init.tools lists the full catalog and `command_status` is rejected by the allowlist
 # registry ("tool not found in registry" = agent fails to start). Re-run conformance after any change (names drift)
 agy_tools: [view_file, list_dir, grep_search, find_by_name, write_to_file, replace_file_content, multi_replace_file_content, run_command]
 # always present regardless of the allowlist (seen in conformance): task-tracking scratchpad, no side effects
-agy_internal_tools: [manage_task]
+agy_internal_tools: [manage_task, view_file_outline, view_code_item]   # last two: read-only code navigation, seen with agy 1.3.6 (2026-10-16)
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: []
 deny_tools: []
-probe: {model: "gemini-4-argon-medium", mode: null}
+probe: {model: "gemini-4-argon-medium", mode: null, git_push: true, profile: slp-builder-flash}

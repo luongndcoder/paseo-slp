@@ -1,0 +1,52 @@
+role: opencode-checker
+family: opencode
+provider_id: slp-opencode-checker
+label: "SLP OpenCode Checker"
+description: "SLP peer checker (OpenCode agent slp-checker): read-only, cannot write files, replies with ONE review JSON, task denied, steps capped"
+agent_name: slp-checker     # select with profile modeId = slp-checker (never --agent)
+steps: 40
+write: none          # edit denied: the Lead saves the reply to .slp/slices/<id>/review.<N>.json
+bash: allowlist
+# WHY globs, not regexes: OpenCode permission patterns (last matching rule wins). slp-build emits
+# `"*": deny`, then these allows, then the denies below, so deny-by-default holds. A bare command and `<cmd> *`
+# are both listed because `"ls *"` is not documented to match a bare `ls`.
+bash_allow:
+  - 'git diff'
+  - 'git diff *'
+  - 'git log'
+  - 'git log *'
+  - 'git show'
+  - 'git show *'
+  - 'git status'
+  - 'git status *'
+  - 'git rev-parse *'
+  - 'git branch --show-current'
+  - 'cat *'
+  - 'ls'
+  - 'ls *'
+  - 'rg *'
+  - 'grep *'
+  - 'head *'
+  - 'tail *'
+  - 'wc *'
+# after the allows so they win: no output files, no external programs via git/rg, no redirections, no substitution
+bash_deny:
+  - '*--output*'
+  - '* --pre *'
+  - '* --pre=*'
+  - '* --pre-glob*'
+  - '*--ext-diff*'
+  - '*--textconv*'
+  - '*>*'
+  - '*$(*'
+  - '*`*'
+protected_branches: []
+paseo_tools: {enabled: false, disabled: []}
+skills_auto: []
+deny_tools: [task]
+# profile slp-checker-deepseek is added by the user to daemon.agentProfiles (provider slp-opencode-checker,
+# model opencode-go/deepseek-v4.1-flash, modeId slp-checker); probe.model/mode are the --cheap fallback.
+probe: {model: "opencode-go/deepseek-v4.1-flash", mode: slp-checker, profile: slp-checker-deepseek}
+# WHY: slp-* provider entries are replaced wholesale by slp-build --apply; the model list is user-set, so it lives here.
+models:
+  - {id: "opencode-go/deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash (Go) — checker", isDefault: true}

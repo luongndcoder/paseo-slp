@@ -5,30 +5,105 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "slice_id", "status", "files_changed", "tests", "deviations", "questions", "hard_gates",
+    "slice_id",
+    "status",
+    "files_changed",
+    "tests",
+    "deviations",
+    "questions",
+    "hard_gates",
     "summary"
   ],
   "properties": {
-    "slice_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
-    "status": {"enum": ["done", "blocked", "needs_input"]},
-    "files_changed": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "slice_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "status": {
+      "enum": [
+        "done",
+        "blocked",
+        "needs_input"
+      ]
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "tests": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cmd", "passed", "failed"],
+      "required": [
+        "cmd",
+        "passed",
+        "failed"
+      ],
       "properties": {
-        "cmd": {"type": "string"},
-        "passed": {"type": "integer", "minimum": 0},
-        "failed": {"type": "integer", "minimum": 0}
+        "cmd": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
-    "deviations": {"type": "array", "items": {"type": "string"}},
-    "questions": {"type": "array", "items": {"type": "string"}},
-    "hard_gates": {"type": "array", "items": {"type": "string"}},
+    "deviations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hard_gates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "summary": {
       "type": "string",
       "description": "At most 5 lines.",
       "pattern": "^[^\\n]*(\\n[^\\n]*){0,4}\\n?$"
+    },
+    "scope_challenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "premise",
+        "evidence",
+        "proposal"
+      ],
+      "description": "Optional. The Builder disputes the brief's design_choice or scope with evidence instead of silently complying or deviating. Never permission to edit outside `files`.",
+      "properties": {
+        "premise": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The brief premise being challenged."
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact file:line text or command output that contradicts it."
+        },
+        "proposal": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What the Lead should change in the brief."
+        }
+      }
     }
   }
 }

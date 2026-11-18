@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """SLP guard: Claude Code PreToolUse / SessionStart hook driven by a per-role policy.
 
+Paseo MCP spawn control (roles with a `spawn_allow` policy list): create_agent only for allowed providers,
+update_agent / set_agent_mode never.
+
 Usage (wired by slp-build into build/claude/<role>.settings.json):
   slp-guard.py --role <role>                 PreToolUse: reads hook JSON on stdin; exit 2 blocks
   slp-guard.py --role <role> --session-start print role.md as additionalContext (prompt fallback)
@@ -21,12 +24,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SLP_BIN = ROOT / "bin"
 # absolute paths of these tools are normalized to the bare name
-SLP_TOOLS = ("slp-verify", "slp-evidence")
+SLP_TOOLS = ("slp-verify", "slp-evidence", "slp-merge")
 SYSTEM_DIRS = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/")
 OPS = {";", "&&", "||", "|", "&", "\n"}
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 WRAPPERS = {"sudo", "env", "command", "nohup", "time", "exec", "xargs", "nice", "builtin"}
 GIT_ARG_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+# Paseo MCP tools Claude sees as mcp__paseo__<op>; matched by the final segment so a renamed MCP server is still policed
+SPAWN_OPS = {"create_agent", "update_agent", "set_agent_mode", "send_agent_prompt"}
 
 
 class Block(Exception):
@@ -170,7 +175,7 @@ def check_git_protection(norm: str, policy: dict, cwd: str) -> None:
     sub, rest = git_info(norm)
     if not protected or not sub:
         return
-    words = re.split(r"\s+", rest)
+    words = [_branch_name(w) for w in re.split(r"\s+", rest)]
     if sub in {"merge", "rebase", "checkout", "switch", "pull"} and any(
         w in protected for w in words
     ):
@@ -225,6 +230,20 @@ def check_bash(command: str, policy: dict, cwd: str, depth: int = 0) -> None:
                 check_bash(inner, policy, cwd, depth + 1)
         elif inner_commands(seg):
             raise Block("nested shell commands are not allowed")
+
+
+def _branch_name(word: str) -> str:
+    """Reduce a ref spelling to its branch name for protected-branch checks.
+
+    WHY: an exact-word match let `git merge origin/master` or `refs/heads/develop` through.
+    Strip ref prefixes (refs/heads/, refs/remotes/<r>/, remotes/<r>/, <remote>/) and revision
+    suffixes (~N, ^, @{...}). Over-matching e.g. `feature/master` is accepted: fail safe.
+    """
+    w = word.strip("'\"")
+    w = re.sub(r"[~^@].*$", "", w)
+    w = re.sub(r"^refs/(heads|tags)/", "", w)
+    w = re.sub(r"^(refs/)?remotes/[^/]+/", "", w)
+    return w.rsplit("/", 1)[-1] if "/" in w else w
 
 
 # ---------------------------------------------------------------- file writes
@@ -285,6 +304,47 @@ def check_write(tool: str, tool_input: dict, policy: dict, cwd: str) -> None:
     raise Block(f"writes are limited to .slp/ {scope}; refused: {path} (cwd={cwd})")
 
 
+# ---------------------------------------------------------------- paseo spawn control
+def spawn_op(tool: str) -> str:
+    """create_agent | update_agent | set_agent_mode when `tool` is a Paseo-MCP spawn tool, else ''."""
+    if tool.startswith("mcp__"):
+        op = tool.rsplit("__", 1)[-1]
+        if op in SPAWN_OPS:
+            return op
+    return ""
+
+
+def provider_id(provider: object) -> str:
+    """Provider part of `provider[/model]` (Paseo splits at the FIRST slash: `slp-pi-builder/openai-api/x`)."""
+    if not isinstance(provider, str):
+        raise Block("create_agent provider is missing or not a string (fail closed)")
+    pid = provider.strip().split("/", 1)[0].strip()
+    if not pid:
+        raise Block("create_agent provider is empty (fail closed)")
+    return pid
+
+
+def check_spawn(op: str, tool_input: object, policy: dict) -> None:
+    if op == "send_agent_prompt":
+        # WHY: send_agent_prompt can switch a child's mode via `sessionMode` (e.g. to bypass);
+        # plain prompts are the Lead's normal job, mode switches are never allowed.
+        if not isinstance(tool_input, dict):
+            raise Block("send_agent_prompt: unparsable tool input (fail closed)")
+        if tool_input.get("sessionMode") not in (None, ""):
+            raise Block("send_agent_prompt with sessionMode (mode switch) is not allowed")
+        return
+    if op != "create_agent":
+        raise Block(f"{op} is not allowed for this role")
+    allow = policy.get("spawn_allow")
+    if not isinstance(allow, list) or not allow:
+        raise Block("create_agent: no spawn allow-list for this role (fail closed)")
+    if not isinstance(tool_input, dict):
+        raise Block("create_agent: unparsable tool input (fail closed)")
+    pid = provider_id(tool_input.get("provider"))
+    if pid not in allow:
+        raise Block(f"create_agent provider {pid!r} is not in the allow-list {allow}")
+
+
 # ---------------------------------------------------------------- entry points
 def session_start(role: str) -> None:
     text = (ROOT / "roles" / role / "role.md").read_text().replace("<SLP_ROOT>", str(ROOT))
@@ -314,7 +374,13 @@ def main() -> None:
         policy = load_policy(ROLE)
         data = json.load(sys.stdin)
         tool = data.get("tool_name", "")
-        tool_input = data.get("tool_input") or {}
+        raw_input = data.get("tool_input")
+        if not isinstance(tool, str):
+            raise Block("tool_name is not a string (fail closed)")
+        if spawn_op(tool):
+            check_spawn(spawn_op(tool), raw_input if raw_input is not None else {}, policy)
+            return
+        tool_input = raw_input or {}
         cwd = data.get("cwd") or os.getcwd()
         if tool == "Bash":
             check_bash(tool_input.get("command", ""), policy, cwd)

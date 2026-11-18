@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""slp-metrics: do reviews change outcomes? One row per reviewer profile (the "Better-SLP" input).
+
+  slp-metrics <dir-or-report.md>... [--json]
+
+Reads every `report.md` (given files, or `**/report.md` under given dirs) and aggregates the front-matter
+`metrics.reviews[{reviewer_profile, findings_total, findings_accepted, changed_outcome}]` entries:
+  reviews          number of review entries
+  change rate      share of reviews with changed_outcome (an accepted finding led to a code change)
+  rejected rate    share of findings dropped by slp-evidence = (findings_total - findings_accepted) / findings_total
+A reviewer with a low change rate and a high rejected rate is a candidate to drop.
+Reports without `metrics.reviews`, or entries that violate the entry shape, are skipped and counted on stderr.
+Exit 0; 2 when no report was found.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+_VENV_PY = Path.home() / ".claude" / "skills" / ".venv" / "bin" / "python3"
+if __name__ == "__main__" and _VENV_PY.is_file() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from slp_schema import ArtifactError, parse_front_matter  # noqa: E402
+
+
+def find_reports(paths: list[str]) -> list[Path]:
+    found: list[Path] = []
+    for raw in paths:
+        p = Path(raw)
+        if p.is_dir():
+            found += sorted(p.rglob("report.md"))
+        elif p.is_file():
+            found.append(p)
+    return sorted(set(found))
+
+
+def valid_entry(e: Any) -> bool:
+    if not isinstance(e, dict):
+        return False
+    prof = e.get("reviewer_profile")
+    total, acc = e.get("findings_total"), e.get("findings_accepted")
+    ints = all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in (total, acc))
+    return (
+        isinstance(prof, str) and bool(prof) and ints and acc <= total  # type: ignore[operator]
+        and isinstance(e.get("changed_outcome"), bool)
+    )
+
+
+def collect(reports: list[Path]) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
+    rows: dict[str, dict[str, int]] = {}
+    skipped = {"reports_unreadable": 0, "reports_without_reviews": 0, "entries_invalid": 0}
+    for path in reports:
+        try:
+            front, _ = parse_front_matter(path.read_text())
+        except (OSError, ArtifactError, UnicodeDecodeError):
+            skipped["reports_unreadable"] += 1
+            continue
+        metrics = front.get("metrics")
+        reviews = metrics.get("reviews") if isinstance(metrics, dict) else None
+        if not isinstance(reviews, list):
+            skipped["reports_without_reviews"] += 1
+            continue
+        for e in reviews:
+            if not valid_entry(e):
+                skipped["entries_invalid"] += 1
+                continue
+            r = rows.setdefault(
+                e["reviewer_profile"],
+                {"reviews": 0, "changed": 0, "findings_total": 0, "findings_accepted": 0},
+            )
+            r["reviews"] += 1
+            r["changed"] += int(e["changed_outcome"])
+            r["findings_total"] += e["findings_total"]
+            r["findings_accepted"] += e["findings_accepted"]
+    return rows, skipped
+
+
+def rate(num: int, den: int) -> float | None:
+    return num / den if den else None
+
+
+def table(rows: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+    out = []
+    for prof in sorted(rows):
+        r = rows[prof]
+        out.append({
+            "reviewer_profile": prof,
+            "reviews": r["reviews"],
+            "changed_outcome": r["changed"],
+            "change_rate": rate(r["changed"], r["reviews"]),
+            "findings_total": r["findings_total"],
+            "findings_accepted": r["findings_accepted"],
+            "rejected_by_evidence_rate": rate(
+                r["findings_total"] - r["findings_accepted"], r["findings_total"]
+            ),
+        })  # fmt: skip
+    return out
+
+
+def pct(x: float | None) -> str:
+    return "-" if x is None else f"{x * 100:.0f}%"
+
+
+def render(data: list[dict[str, Any]]) -> str:
+    head = ["reviewer_profile", "reviews", "change rate", "rejected rate", "findings", "accepted"]
+    body = [
+        [d["reviewer_profile"], str(d["reviews"]), pct(d["change_rate"]),
+         pct(d["rejected_by_evidence_rate"]), str(d["findings_total"]), str(d["findings_accepted"])]
+        for d in data
+    ]  # fmt: skip
+    widths = [max(len(r[i]) for r in [head, *body]) for i in range(len(head))]
+    lines = ["  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip() for row in [head, *body]]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("paths", nargs="+", help="report.md files or directories searched recursively")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    try:
+        args = ap.parse_args()
+    except SystemExit as exc:
+        return 2 if exc.code else 0
+    reports = find_reports(args.paths)
+    if not reports:
+        print("slp-metrics: no report.md found", file=sys.stderr)
+        return 2
+    rows, skipped = collect(reports)
+    data = table(rows)
+    if args.json:
+        print(json.dumps({"reports": len(reports), "skipped": skipped, "reviewers": data}, indent=2))
+    else:
+        print(f"{len(reports)} report(s)")
+        print(render(data) if data else "(no review metrics found)")
+    notes = [f"{k}={v}" for k, v in skipped.items() if v]
+    if notes:
+        print("slp-metrics: skipped " + ", ".join(notes), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -22,17 +22,25 @@ def finding(file: str, line: int, evidence: str) -> dict[str, Any]:
 
 
 class EvidenceTests(RepoCase):
-    def run_evidence(self, findings: list[dict[str, Any]], brief: Path | None = None) -> dict:
+    def run_evidence(
+        self, findings: list[dict[str, Any]], brief: Path | None = None, head_sha: str | None = None,
+        extra: list[str] | None = None, expect_rc: int = 0,
+    ) -> dict:  # fmt: skip
         review = write(
             self.repo,
             ".slp/slices/s1/review.1.json",
-            json.dumps({"slice_id": "s1", "round": 1, "verdict": "fix", "findings": findings}),
-        )
+            json.dumps(
+                {
+                    "slice_id": "s1", "round": 1, "verdict": "fix", "findings": findings,
+                    "head_sha": head_sha or self.head(), "base_ref": "base",
+                }
+            ),
+        )  # fmt: skip
         cmd = [sys.executable, str(EVIDENCE), str(review), str(self.repo)]
         if brief:
             cmd += ["--brief", str(brief)]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        res = subprocess.run(cmd + (extra or []), capture_output=True, text=True)
+        self.assertEqual(res.returncode, expect_rc, res.stdout + res.stderr)
         out = review.with_name("review.1.checked.json")
         self.assertTrue(out.is_file())
         return json.loads(out.read_text())
@@ -60,6 +68,7 @@ class EvidenceTests(RepoCase):
         self.assertIn("not in the diff", reasons["X = 1"])
         self.assertEqual(schema_errors(checked, "review"), [])
         self.assertEqual(checked["verdict"], "fix")
+        self.assertEqual(checked["status"], "checked")
 
     def test_whitespace_normalised_and_multiline_evidence(self) -> None:
         self.prepare()
@@ -81,7 +90,7 @@ class EvidenceTests(RepoCase):
         self.prepare()
         brief = write(
             self.repo, "other-brief.md",
-            "---\nslice_id: s1\ngoal: g\nfiles: [src/other.py]\nbase_ref: base\n"
+            "---\nslice_id: s1\ngoal: g\nconstraints: [c]\ndesign_choice: d\nfiles: [src/other.py]\nbase_ref: base\n"
             "tests_must_pass: []\nout_of_scope: []\n---\n",
         )  # fmt: skip
         checked = self.run_evidence([finding("src/other.py", 1, "X = 1")], brief=brief)
@@ -103,6 +112,7 @@ class EvidenceTests(RepoCase):
             json.dumps(
                 {
                     "slice_id": "workstream", "round": 1, "verdict": "fix",
+                    "head_sha": self.head(), "base_ref": "base",
                     "findings": [finding("src/app.py", 8, "COMMITTED = 1")],
                 }
             ),
@@ -114,6 +124,48 @@ class EvidenceTests(RepoCase):
             )  # fmt: skip
             out = json.loads(review.with_name("final-review.checked.json").read_text())
             self.assertEqual(len(out["findings"]), expected, extra)
+
+    def test_stale_review_is_rejected_whole(self) -> None:
+        self.prepare()
+        good = finding("src/app.py", 2, 'query =  {"merchant_id": merchant_id, "enabled": True}')
+        reviewed = self.head()
+        write(self.repo, "src/other.py", "X = 2\n")
+        self.commit("new commit after the review")  # HEAD moves: the review names an old SHA
+        checked = self.run_evidence([good], head_sha=reviewed, expect_rc=1)
+        self.assertEqual(checked["status"], "stale")
+        self.assertEqual(checked["findings"], [])
+        self.assertEqual(checked["rejected"][0]["finding"], good)
+        self.assertIn("stale review", checked["rejected"][0]["reason"])
+        self.assertIn(self.head(), checked["rejected"][0]["reason"])
+        self.assertEqual(schema_errors(checked, "review"), [])
+
+    def test_stale_review_with_no_findings_is_still_stale(self) -> None:
+        self.prepare()
+        checked = self.run_evidence([], head_sha="0" * 40, expect_rc=1)
+        self.assertEqual(checked["status"], "stale")
+
+    def test_allow_stale_judges_findings_but_marks_status(self) -> None:
+        self.prepare()
+        good = finding("src/app.py", 2, 'query =  {"merchant_id": merchant_id, "enabled": True}')
+        checked = self.run_evidence([good], head_sha="0" * 40, extra=["--allow-stale"])
+        self.assertEqual(checked["findings"], [good])
+        self.assertEqual(checked["status"], "stale")
+
+    def test_review_without_head_sha_is_usage_error(self) -> None:
+        bad = write(
+            self.repo, "nohead.json",
+            json.dumps({"slice_id": "s1", "round": 1, "verdict": "pass", "findings": []}),
+        )  # fmt: skip
+        res = subprocess.run(
+            [sys.executable, str(EVIDENCE), str(bad), str(self.repo)], capture_output=True, text=True
+        )
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("head_sha", res.stderr)
+
+    def test_short_sha_is_rejected_by_schema(self) -> None:
+        review = {"slice_id": "s1", "round": 1, "verdict": "pass", "findings": [],
+                  "head_sha": self.head()[:7], "base_ref": "base"}  # fmt: skip
+        self.assertNotEqual(schema_errors(review, "review"), [])
 
     def test_invalid_review_is_usage_error(self) -> None:
         bad = write(self.repo, "bad.json", json.dumps({"slice_id": "s1"}))

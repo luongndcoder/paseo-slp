@@ -1,0 +1,22 @@
+repo: backend
+commands:
+  test:
+    cmd: "/Users/luongcoder/Documents/AI/tranzlytic/backend/.venv/bin/python -m pytest -q {tests}"
+    timeout: 900
+  lint:
+    skip: "no linter configured in tranzlytic backend"
+  typecheck:
+    skip: "no typechecker configured in tranzlytic backend"
+hard_gate_rules:
+  - id: tranzlytic_payment_webhook
+    description: SePay webhook / subscription changes need human review
+    paths:
+      - '(^|/)src/.*(sepay|payment|subscription)[^/]*\.py$'
+  - id: tranzlytic_indexes
+    description: Mongo index changes are a hard gate
+    paths:
+      - '(^|/)ensure_indexes_mongo\.py$'
+sandbox_escape:
+  paths:
+    - '(^|/)docker-compose[^/]*\.ya?ml$'
+  structured: []

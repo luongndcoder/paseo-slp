@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""slp-merge: the Lead's ONE sanctioned way to merge (and push) its workstream branch into a protected branch.
+
+  slp-merge <worktree> --into <branch> [--push]
+
+Raw `git merge` / `git push` stay blocked by hooks/slp-guard.py and the push-block env; this command re-checks itself:
+  - policy: roles/lead/policy.yaml `protected_merge` (read from this checkout only, no env override): <branch> must be
+    in `branches`; if `roots` is non-empty the repo's main checkout (parent of the git common dir) must be under one;
+    never under `deny_roots`; `--push` needs `push: true`.
+  - source: <worktree> is on a real branch that is not in the Lead's `protected_branches`; tracked files are clean.
+  - evidence: <worktree>/.slp/final-review.checked.json is schema-valid, status checked, verdict pass and its head_sha
+    (as final-review.json's) equals the source HEAD (any later commit makes the review stale).
+  - target: the worktree that already has <branch> checked out (slp-merge never checks out); tracked files clean.
+Then `git merge --no-ff` in the target and writes <worktree>/.slp/merge.json. Never checks out, pulls or resets; on
+conflict it runs `git merge --abort` and lists the conflicting files.
+--push: remote = `branch.<branch>.remote` (no upstream -> refused); `git fetch` it and require local <branch> ==
+<remote>/<branch> (offline runs without --push never touch the remote). The source branch is pushed BEFORE the merge
+(a rejection leaves nothing merged), then <branch> after it. Pushes never force/delete/mirror. A failed target push
+keeps the local merge (no reset), exits 1 and tells the Lead to escalate.
+Exit: 0 merged (and pushed), 1 refused/conflict/push failed, 2 usage/internal error.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+_VENV_PY = Path.home() / ".claude" / "skills" / ".venv" / "bin" / "python3"
+if __name__ == "__main__" and _VENV_PY.is_file() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import slp_git  # noqa: E402
+from slp_schema import ArtifactError, load_json, schema_errors  # noqa: E402
+
+POLICY_PATH = ROOT / "roles" / "lead" / "policy.yaml"
+
+
+class Refuse(Exception):
+    """A precondition failed: nothing was merged (exit 1)."""
+
+
+def real(path: str) -> Path:
+    return Path(os.path.realpath(os.path.expanduser(path)))
+
+
+def load_merge_policy() -> dict[str, Any]:
+    """`protected_merge` + `protected_branches` of the Lead policy. WHY no env/arg override: the Lead runs this
+    command and must not be able to point it at a more permissive policy."""
+    import yaml
+
+    pol = yaml.safe_load(POLICY_PATH.read_text()) or {}
+    pm = pol.get("protected_merge")
+    if not isinstance(pm, dict):
+        raise ArtifactError(f"{POLICY_PATH}: no `protected_merge` section")
+    return {
+        "branches": [str(b) for b in pm.get("branches") or []],
+        "roots": [real(r) for r in pm.get("roots") or []],  # empty/absent = every repo
+        "deny_roots": [real(r) for r in pm.get("deny_roots") or []],
+        "push": pm.get("push") is True,
+        "protected_branches": [str(b) for b in pol.get("protected_branches") or []],
+    }
+
+
+def under(path: Path, roots: list[Path]) -> Path | None:
+    return next((r for r in roots if path == r or path.is_relative_to(r)), None)
+
+
+def tracked_dirty(worktree: Path) -> list[str]:
+    out = slp_git.git(worktree, "status", "--porcelain", "--untracked-files=no")
+    return [ln for ln in out.splitlines() if ln.strip() and not ln[3:].startswith(".slp/")]
+
+
+def worktree_of_branch(worktree: Path, branch: str) -> Path | None:
+    """Path of the worktree that has refs/heads/<branch> checked out, via `git worktree list --porcelain`."""
+    current: Path | None = None
+    for ln in slp_git.git(worktree, "worktree", "list", "--porcelain").splitlines():
+        if ln.startswith("worktree "):
+            current = real(ln[len("worktree "):])
+        elif ln == f"branch refs/heads/{branch}":
+            return current
+    return None
+
+
+def final_review_sha(worktree: Path, source_sha: str) -> str:
+    """Validate the final-review evidence for `source_sha`; return its head_sha (== source_sha) or Refuse."""
+    stale_hint = "re-run the final reviewer, then slp-evidence .slp/final-review.json <worktree> --base <base_branch>"
+    docs: dict[str, dict[str, Any]] = {}
+    for name in ("final-review.checked.json", "final-review.json"):
+        path = worktree / ".slp" / name
+        if not path.is_file():
+            raise Refuse(f"missing {path}: run the final reviewer, then slp-evidence on final-review.json")
+        try:
+            doc = load_json(path)
+        except ArtifactError as exc:
+            raise Refuse(f"{path} is not valid JSON: {exc}") from exc
+        errors = schema_errors(doc, "review")
+        if errors:
+            raise Refuse(f"{path} violates the review schema: " + "; ".join(errors))
+        docs[name] = doc
+    checked = docs["final-review.checked.json"]
+    if checked.get("status") != "checked":
+        raise Refuse(f"final-review.checked.json status is {checked.get('status')!r}, not 'checked': {stale_hint}")
+    if checked["verdict"] != "pass":
+        raise Refuse(f"final review verdict is {checked['verdict']!r}, not 'pass': fix the findings first")
+    for name, doc in docs.items():
+        if doc["head_sha"].lower() != source_sha:
+            raise Refuse(
+                f"STALE final review: {name} head_sha {doc['head_sha']} != branch HEAD {source_sha}: {stale_hint}"
+            )
+    return checked["head_sha"].lower()
+
+
+def git_run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *slp_git.GIT_SAFE, "-C", str(cwd), *args], capture_output=True, text=True)
+
+
+def push_ref(cwd: Path, remote: str, refspec: str) -> subprocess.CompletedProcess[str]:
+    """The ONLY push in this tool: plain `git push <remote> <refspec>`. No force/force-with-lease/delete/mirror/
+    all/tags, and a leading `+` (forced refspec) is rejected, so the remote can only fast-forward."""
+    if refspec.startswith("+") or remote.startswith("-"):
+        raise ArtifactError(f"internal: refusing unsafe push target {remote!r} {refspec!r}")
+    return git_run(cwd, "push", remote, refspec)
+
+
+def tail(res: subprocess.CompletedProcess[str]) -> str:
+    return (res.stderr.strip() or res.stdout.strip())[-400:]
+
+
+def sync_with_remote(target: Path, into: str) -> str:
+    """Resolve the remote of <into>, fetch it and require local <into> == <remote>/<into>. Returns the remote name."""
+    remote = slp_git.git(target, "config", "--get", f"branch.{into}.remote", check=False).strip()
+    if not remote or remote == ".":
+        raise Refuse(f"no remote for {into!r}: set upstream for {into} (git branch --set-upstream-to=<remote>/{into})")
+    if remote.startswith("-"):
+        raise ArtifactError(f"invalid remote name {remote!r} in branch.{into}.remote")
+    tracking = f"refs/remotes/{remote}/{into}"
+    fetched = git_run(target, "fetch", remote, f"+refs/heads/{into}:{tracking}")
+    if fetched.returncode != 0:
+        raise Refuse(f"cannot fetch {remote}/{into}: {tail(fetched)}")
+    local = slp_git.git(target, "rev-parse", "--verify", f"refs/heads/{into}").strip()
+    remote_sha = slp_git.git(target, "rev-parse", "--verify", tracking).strip()
+    if local != remote_sha:
+        raise Refuse(
+            f"local {into} ({local[:12]}) != {remote}/{into} ({remote_sha[:12]}): the target is behind or ahead of "
+            "the remote; ask the user to sync the main checkout (slp-merge never pulls or resets)"
+        )
+    return remote
+
+
+def merge(worktree_arg: str, into: str, push: bool = False) -> int:
+    policy = load_merge_policy()
+    if into not in policy["branches"]:
+        raise Refuse(f"--into {into!r} is not mergeable via slp-merge (allowed: {', '.join(policy['branches'])})")
+    if push and not policy["push"]:
+        raise Refuse("--push is not enabled by protected_merge.push in the Lead policy")
+
+    worktree = real(worktree_arg)
+    if not worktree.is_dir():
+        raise ArtifactError(f"worktree {worktree} is not a directory")
+    top = real(slp_git.git(worktree, "rev-parse", "--show-toplevel").strip())
+    if top != worktree:
+        raise ArtifactError(f"{worktree} is not the root of a git worktree (root is {top})")
+
+    source = slp_git.git(worktree, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip()
+    if not source:
+        raise Refuse(f"{worktree} has a detached HEAD: check out the workstream branch first")
+    if source == into or source in policy["protected_branches"]:
+        raise Refuse(f"source branch {source!r} is protected: only a workstream branch can be merged")
+    source_sha = slp_git.head_sha(worktree)
+
+    repo_root = slp_git.common_git_dir(worktree).parent
+    denied = under(repo_root, policy["deny_roots"])
+    if denied:
+        raise Refuse(f"repo {repo_root} is under deny_roots entry {denied}: slp-merge is for personal repos only")
+    if policy["roots"] and not under(repo_root, policy["roots"]):
+        roots = ", ".join(str(r) for r in policy["roots"])
+        raise Refuse(f"repo {repo_root} is outside protected_merge.roots ({roots}): slp-merge is for personal repos only")
+
+    dirty = tracked_dirty(worktree)
+    if dirty:
+        raise Refuse(f"source worktree has uncommitted tracked changes: {'; '.join(d.strip() for d in dirty[:5])}")
+
+    review_sha = final_review_sha(worktree, source_sha)
+
+    target = worktree_of_branch(worktree, into)
+    if target is None:
+        raise Refuse(f"no worktree has {into!r} checked out: check out {into} in the main checkout; slp-merge never checks out")
+    dirty = tracked_dirty(target)
+    if dirty:
+        raise Refuse(f"target worktree {target} has uncommitted tracked changes: {'; '.join(d.strip() for d in dirty[:5])}")
+    if git_run(target, "merge-base", "--is-ancestor", source_sha, "HEAD").returncode == 0:
+        raise Refuse(
+            f"{source} ({source_sha[:12]}) is already contained in {into}: nothing to merge "
+            "(if an earlier push failed, escalate to the user)"
+        )
+
+    pushed: dict[str, Any] = {"remote": None, "source": False, "target": False}
+    if push:
+        remote = pushed["remote"] = sync_with_remote(target, into)
+        # WHY before the merge: a rejected source push (non-ff on the remote branch) then leaves nothing merged.
+        res = push_ref(target, remote, f"{source_sha}:refs/heads/{source}")
+        if res.returncode != 0:
+            raise Refuse(f"push of {source} to {remote} was rejected, nothing merged: {tail(res)}")
+        pushed["source"] = True
+
+    msg = f"Merge {source} into {into} (SLP final review pass {source_sha[:12]})"
+    res = git_run(target, "merge", "--no-ff", "-m", msg, source_sha)
+    if res.returncode != 0:
+        conflicts = slp_git.git(target, "diff", "--name-only", "--diff-filter=U", check=False).split()
+        git_run(target, "merge", "--abort")
+        print(f"slp-merge: merge of {source} into {into} failed, aborted ({into} unchanged)", file=sys.stderr)
+        if conflicts:
+            print("  conflicting files:", file=sys.stderr)
+            for name in conflicts:
+                print(f"    {name}", file=sys.stderr)
+            print(
+                f"  action: do not resolve it yourself; dispatch a Builder slice to merge {into} into {source}, "
+                "then re-verify, re-run the final review + slp-evidence, retry slp-merge",
+                file=sys.stderr,
+            )
+        else:
+            print("  " + tail(res), file=sys.stderr)
+        return 1
+
+    merge_sha = slp_git.head_sha(target)
+    push_failure = ""
+    if push:
+        res = push_ref(target, pushed["remote"], f"refs/heads/{into}:refs/heads/{into}")
+        pushed["target"] = res.returncode == 0
+        if not pushed["target"]:
+            push_failure = tail(res)
+    doc = {
+        "into": into,
+        "target_worktree": str(target),
+        "source_branch": source,
+        "source_sha": source_sha,
+        "merge_sha": merge_sha,
+        "final_review_head_sha": review_sha,
+        "merged_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "pushed": pushed,
+    }
+    out = worktree / ".slp" / "merge.json"
+    try:
+        out.write_text(json.dumps(doc, indent=2) + "\n")
+    except OSError as exc:
+        raise ArtifactError(f"merged ({merge_sha}) but cannot write {out}: {exc}") from exc
+    if push_failure:
+        print(
+            f"slp-merge: merged {source} into {into} LOCALLY ({merge_sha[:12]}), but pushing {into} to "
+            f"{pushed['remote']} FAILED: {push_failure}",
+            file=sys.stderr,
+        )
+        print(
+            f"  the source branch {'was' if pushed['source'] else 'was NOT'} pushed; the local merge is kept "
+            "(no reset). ESCALATE to the user: do not retry or resolve it yourself.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"slp-merge: merged {source} ({source_sha[:12]}) into {into} -> {merge_sha[:12]}  ({out})")
+    if push:
+        print(f"  pushed {source} and {into} to {pushed['remote']}")
+    else:
+        print(f"  target worktree  {target}  (not pushed)")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("worktree")
+    ap.add_argument("--into", required=True, help="protected branch to merge into (must be in protected_merge.branches)")
+    ap.add_argument("--push", action="store_true", help="push the source branch, then <into>, to its upstream remote")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as exc:
+        return 2 if exc.code else 0
+    # WHY: inherited GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE would redirect git away from the worktrees this command
+    # validated, and GIT_CONFIG_COUNT/KEY_i/VALUE_i carries the `pushInsteadOf` push-block every Lead/builder process
+    # gets (lib/slp_git_push_block.py). Stripping them is why `git push` works HERE (after every check above) while a
+    # raw `git push` stays blocked for every role.
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        del os.environ[key]
+    try:
+        return merge(args.worktree, args.into, args.push)
+    except Refuse as exc:
+        print(f"slp-merge: refused: {exc}", file=sys.stderr)
+        return 1
+    except (ArtifactError, slp_git.GitError) as exc:
+        print(f"slp-merge: error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - internal errors must map to exit 2
+        print(f"slp-merge: internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

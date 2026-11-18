@@ -1,0 +1,12 @@
+repo: momir-backend
+
+commands:
+  test:
+    cmd: "docker compose -f docker-compose.test.yml up -d --wait && /Users/luongcoder/.cargo/bin/cargo test"
+    timeout: 1800
+  lint:
+    cmd: "/Users/luongcoder/.cargo/bin/cargo clippy --all-targets -- -D warnings"
+    timeout: 1200
+  typecheck:
+    cmd: "/Users/luongcoder/.cargo/bin/cargo check --all-targets"
+    timeout: 1200

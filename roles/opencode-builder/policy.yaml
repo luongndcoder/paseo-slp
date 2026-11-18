@@ -16,4 +16,7 @@ git_push_block: true
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: []
 deny_tools: [task]
-probe: {model: "opencode-go/deepseek-v4.1-flash", mode: slp-builder, git_push: true, skip_reason: "opencode quota exhausted"}
+probe: {model: "opencode-go/deepseek-v4.1-flash", mode: slp-builder, git_push: true, skip_reason: "opencode quota exhausted", profile: slp-builder-deepseek}
+# WHY: slp-* provider entries are replaced wholesale by slp-build --apply; the model list is user-set, so it lives here.
+models:
+  - {id: "opencode-go/deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash (Go) — FE + BE", isDefault: true}

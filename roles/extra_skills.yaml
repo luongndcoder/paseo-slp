@@ -14,3 +14,4 @@
 - simplify
 - update-config
 - workflow-authoring
+- web-artifacts-builder   # plugin skill anthropic-skills:web-artifacts-builder

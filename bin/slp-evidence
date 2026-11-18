@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """slp-evidence: drop review findings that are not backed by the code.
 
-  slp-evidence <review.json> <worktree> [--brief PATH] [--base REF]
+  slp-evidence <review.json> <worktree> [--brief PATH] [--base REF] [--allow-stale]
+
+A review is valid only for the commit it names: if review.head_sha != the worktree's current HEAD the WHOLE
+review is rejected (status `stale`, every finding moves to `rejected[]`, exit 1) so the Lead re-runs the reviewer
+on the current commit. `--allow-stale` skips that check (diagnostics only; the output is still marked `stale`).
 
 For every finding: `file` must be in the diff (base...HEAD + uncommitted/untracked) or listed in
 brief.files; `line` must exist in the file at HEAD (working tree for files with uncommitted
 changes); `evidence` (whitespace-normalised) must appear within +-3 lines of `line`.
 `--base REF` sets the diff base when there is no brief (use the base branch for final-review.json);
 default base: the brief's base_ref, else HEAD (uncommitted changes only).
-Writes <review>.checked.json (same shape; failing findings move to `rejected[]` with a reason).
-Exit 0 on success, 2 on usage/input error.
+Writes <review>.checked.json (same shape; failing findings move to `rejected[]` with a reason; `status` is
+`checked` or `stale`). Exit 0 checked, 1 stale (unless --allow-stale), 2 on usage/input error.
 """
 from __future__ import annotations
 
@@ -103,6 +107,32 @@ def run(args: argparse.Namespace) -> int:
     except slp_git.GitError as exc:
         raise ArtifactError(str(exc)) from exc
 
+    current = slp_git.head_sha(worktree)
+    stale = review["head_sha"].lower() != current
+    if stale:
+        print(
+            f"slp-evidence: STALE review: head_sha {review['head_sha']} != worktree HEAD {current}",
+            file=sys.stderr,
+        )
+    if review["base_ref"] != base_ref:
+        print(
+            f"slp-evidence: note: review base_ref {review['base_ref']!r} != base used here {base_ref!r}",
+            file=sys.stderr,
+        )
+    out = review_path.with_name(re.sub(r"\.json$", "", review_path.name) + ".checked.json")
+    if stale and not args.allow_stale:
+        reason = f"stale review: head_sha {review['head_sha']} != current worktree HEAD {current}"
+        rejected = list(review.get("rejected") or []) + [
+            {"finding": f, "reason": reason} for f in review["findings"]
+        ]
+        checked = {**review, "status": "stale", "findings": [], "rejected": rejected}
+        notes = (review.get("notes") or "") + (" | " if review.get("notes") else "") + reason
+        checked["notes"] = notes
+        out.write_text(json.dumps(checked, indent=2, ensure_ascii=False) + "\n")
+        print(f"slp-evidence: STALE, whole review rejected ({len(review['findings'])} finding(s)) -> {out}")
+        print("  action: re-run the reviewer on the current HEAD (re-verify first if HEAD moved)")
+        return 1
+
     allowed = changed | brief_files
     kept: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = list(review.get("rejected") or [])
@@ -112,8 +142,7 @@ def run(args: argparse.Namespace) -> int:
             kept.append(finding)
         else:
             rejected.append({"finding": finding, "reason": reason})
-    checked = {**review, "findings": kept, "rejected": rejected}
-    out = review_path.with_name(re.sub(r"\.json$", "", review_path.name) + ".checked.json")
+    checked = {**review, "status": "stale" if stale else "checked", "findings": kept, "rejected": rejected}
     out.write_text(json.dumps(checked, indent=2, ensure_ascii=False) + "\n")
     print(
         f"slp-evidence: kept {len(kept)}, rejected {len(rejected)} "
@@ -130,6 +159,8 @@ def main() -> int:
     ap.add_argument("review")
     ap.add_argument("worktree")
     ap.add_argument("--brief", help="brief.md path (default .slp/slices/<slice_id>/brief.md)")
+    ap.add_argument("--allow-stale", action="store_true",
+                    help="do not reject a review whose head_sha != worktree HEAD (diagnostics only)")
     ap.add_argument("--base", help="diff base ref when there is no brief (e.g. the base branch)")
     try:
         args = ap.parse_args()

@@ -260,6 +260,66 @@ Baseline so sánh: cùng task chạy 1 agent Sonnet (hoặc Lead-direct). Chưa 
 1. ~~Tên tool `paseoTools.disabledTools`~~ — đã trả lời (§5 Wiring).
 2. ~~Cách Paseo spawn từng provider~~ — đã trả lời (§5 Wiring); 4 điểm unknown chuyển thành probe conformance.
 
+### Fix 2026-10-28: Paseo không thấy agent OpenCode slp-builder/slp-checker
+- Nguyên nhân: `models` trong provider = replacement list; manifest OpenCode có static modes (build/plan) → `provider-registry.ts` fetchCatalog trả static modes, bỏ qua catalog runtime → `Invalid mode 'slp-checker'`.
+- Fix (chỉ config): `slp-build` ghi `additionalModels` thay `models` cho family `opencode`. Daemon giờ thấy 4 mode.
+- Conformance model thật PASS: slp-builder-deepseek, slp-builder-deepseek@git_push, slp-checker-deepseek, slp-supervisor (bash `touch` bị chặn; probe thật: git chạy, `ls` bị chặn).
+- Cảnh báo `OpenCode server manager already initialized with different runtime settings` vô hại với v2: legacy client tạo sẵn (runtime-client.ts:65) nhưng v2 dùng `OpenCodeV2AgentClient` riêng mỗi provider với `settings.env`.
+
+### Lead merge + push về test/master/develop qua slp-merge (2026-10-28, quyết định của user)
+- Lead được merge VÀ push nhánh workstream đã xong vào `test` / `master` / `develop` ở MỌI repo (kể cả Mobio), nhưng vẫn chỉ sau Final Review `pass` còn mới (không stale). Lead chỉ tạo merge commit: không `git add` / `git commit`, không sửa src. `git merge` / `rebase` / `pull` / `push` thô vẫn bị `hooks/slp-guard.py` chặn; `protected_branches` và `check_git_protection` không đổi.
+- Lệnh deterministic `bin/slp-merge <worktree> --into <branch> [--push]` (nằm trong `bash_allow` của Lead). Policy ở `roles/lead/policy.yaml` mục `protected_merge`: `branches: [test, master, develop]`, `roots` tuỳ chọn (vắng hoặc rỗng = mọi repo), `deny_roots: []` (nếu có thì thắng `roots`), `push: true`. Policy đọc từ chính checkout này, không có env override. `--push` bị từ chối khi `push` không phải true.
+- Điều kiện: branch nguồn không detached, không thuộc `protected_branches`; `.slp/final-review.checked.json` hợp lệ schema, `status: checked`, `verdict: pass`, `head_sha` (cả `final-review.json`) == HEAD nguồn; worktree nguồn và đích sạch với file tracked; đích là worktree đang checkout sẵn `<branch>` (slp-merge không bao giờ checkout, pull hay reset).
+- Với `--push` (chỉ khi có `--push` mới đụng remote, nên chạy offline vẫn merge local được): remote = `branch.<into>.remote`, không có thì từ chối ("set upstream for <into>"); `git fetch` rồi yêu cầu local `<into>` == `<remote>/<into>`, lệch thì từ chối và nhờ user sync main checkout. Thứ tự: push nhánh nguồn TRƯỚC khi merge (bị reject thì chưa merge gì), rồi `git merge --no-ff`, rồi push `<into>`. Mọi push chỉ là `git push <remote> <refspec>`: không force / force-with-lease / delete / mirror / all / tags, refspec không có `+`.
+- Push target thất bại (ví dụ race): giữ merge local, không reset, in rõ chuyện đã xảy ra, exit 1, Lead phải escalate cho user. Conflict: `git merge --abort`, liệt kê file xung đột, exit 1; Lead không tự giải mà giao Builder merge nhánh đích vào nhánh workstream, verify, review lại, thử lại. `.slp/merge.json` có `merge_sha`, `source_sha`, `final_review_head_sha`, `pushed {remote, source, target}`. Exit: 0 xong, 1 refused/conflict/push lỗi, 2 lỗi.
+- Vì sao push của slp-merge chạy được: process Lead/builder mang env `GIT_CONFIG_*` (`pushInsteadOf` push block); slp-merge xoá mọi `GIT_*` khi khởi động và chỉ push sau khi qua hết kiểm tra, còn `git push` thô vẫn bị chặn cho mọi role.
+- `slp-merge` là ngoại lệ duy nhất so với mọi quy tắc global/Mobio kiểu "không push / không merge test, master, develop" (ghi ở mục Precedence của `roles/lead/role.md`). Lead theo git flow của repo nếu user/workstream chỉ định (ví dụ Mobio: feature -> test trước); không rõ nhánh đích thì hỏi user/Supervisor.
+
+### Supervisor có shell allowlist (2026-10-28, quyết định của user)
+- `roles/supervisor/policy.yaml`: `bash: none` → `allowlist`, giống Lead nhưng bỏ `git merge` (Supervisor không integrate): `slp-verify`, `slp-evidence`, `git status|diff|log|show|rev-parse`, `git branch` (không xoá/đổi tên), `git worktree list`; `protected_branches: [test, master, develop]`. Vẫn `write: none`.
+- Mục đích: tự kiểm claim của Lead (status/log/verdict), không review diff từng dòng. `ls`/`cat` bị chặn, dùng Read/Grep/Glob.
+
+### Mapping model theo nghiên cứu (2026-10-23) — build/model-selection-2026-10.md
+- Supervisor Opus 5.5 · **Lead Opus 5.5 medium** (trước: Sonnet; cost/task đo được ≈ hoặc thấp hơn Sonnet nhờ ít token) · Final Reviewer Opus high · Advisor Sonnet.
+- Builder **FE + BE → `slp-builder-deepseek`** (opencode-go/deepseek-v4.1-flash). Fallback: Sonnet → Pi Gemini → Antigravity Gemini. GLM 5.3 Flash bị loại (Design Arena 1272, #27, thấp hơn DeepSeek 1323).
+- Checker: builder không phải Claude → `slp-checker-sonnet` (Opus nếu rủi ro cao); builder Sonnet → **`slp-checker-deepseek`** (cross-family, OpenCode read-only).
+- Builder chỉ ~5% chi phí workstream → ưu tiên chọn đúng model cho Lead/reviewer hơn là ép builder rẻ.
+- Dữ liệu: tránh `*-contributor` (train trên data) và `*-free` (chưa xác minh).
+
+### Điều chỉnh theo bài vhLam (2026-10-22) — https://vhlam.com/article/agent-orchestration-multi-agent-slp
+- Advisor: bỏ "devil's advocate"; chỉ chất vấn khi có bằng chứng, "không phản đối" là câu trả lời hợp lệ. Test chặn lời lẽ debate-reward.
+- Bằng chứng gắn phiên bản: `head_sha` bắt buộc trong verify/review; `slp-evidence` đánh `stale` nếu lệch HEAD.
+- Brief 3 phần: `goal` / `constraints` / `design_choice` (được chất vấn); builder trả `scope_challenge` có bằng chứng; Lead phải xử lý trước vòng sau.
+- Metric `metrics.reviews[]` (changed_outcome) + `bin/slp-metrics` để bỏ reviewer ít giá trị.
+- Không chạy SLP cho việc nhỏ (≤ ~2 file, không hard gate) hoặc việc cần phản hồi liên tục (UI/UX) → chat thẳng 1 builder. Bỏ lời lẽ persona.
+- Khác bài có chủ đích: Peer vẫn dùng model rẻ hơn Lead (mục tiêu chi phí).
+- Định tuyến builder mới (user): **FE → `slp-builder-glm` (opencode/glm-5.3-flash)**, fallback Pi → Antigravity Gemini; **BE → `slp-builder-deepseek` (opencode-go/deepseek-v4.1-flash)**, fallback Sonnet. 190 test pass.
+
+### Định tuyến builder theo loại slice (2026-10-21, quyết định của user — đã thay bởi 2026-10-22)
+- **Frontend** → Gemini 3.8 Flash: `slp-builder-pi-flash` (ưu tiên) hoặc `slp-builder-flash` (Antigravity).
+- **Backend** → DeepSeek V4.1 Flash: `slp-builder-deepseek`.
+- Slice lẫn FE+BE → tách đôi. Vòng 4–5, slice hard gate đã duyệt, hoặc hết quota → `slp-builder-sonnet`.
+
+### Bỏ Codex (2026-10-21)
+- User huỷ đăng ký Codex → gỡ role/provider `slp-codex-checker`, `slp-codex-advisor` và profile tương ứng. Thêm role `claude-advisor` (provider `slp-claude-advisor`, profile `slp-advisor-sonnet`, Sonnet thinking high, read-only, không spawn/hỏi user) — conformance PASS trên model thật.
+- Checker: builder không phải Claude → `slp-checker-sonnet`/`slp-checker-opus`; builder Sonnet → `slp-checker-opus` (khác model, cùng họ — hiện không còn checker khác họ).
+- `slp-build --apply` tự xoá provider `slp-*` không còn role. Conformance dọn probe bằng `paseo delete` (xoá hẳn).
+
+### Conformance trên model thật (2026-10-21)
+- `--profile-models` (mặc định) áp cho mọi họ: integration-reviewer (opus), checker-sonnet, builder-flash (agy gemini-3.8-flash-high), builder-pi-flash: PASS. Không thấy override theo model nào khác ngoài Claude (Codex: sandbox chỉ đổi khi profile có modeId; agy/pi/opencode chỉ thêm --model/--thinking).
+- **gpt-6-astra không dùng được với tài khoản Codex hiện tại** (ChatGPT Plus: "not supported") → `slp-checker-codex`, `slp-advisor-codex` thực tế không chạy được; harness PASS trên gpt-6-luna. OpenCode chờ quota (~4 ngày).
+- 160 test pass.
+
+### Fix 2026-10-20: role settings bị Paseo đè
+- Nguyên nhân: fork `claude/agent.ts:3568-3593` + `model-manifest.ts` — model có fast mode (Opus 4.6–5.5; Sonnet chỉ khi ultracode) → Paseo truyền `--settings` riêng, nằm sau argv → đè `--settings` role → agent Opus chạy KHÔNG harness. Conformance cũ dùng haiku nên báo PASS sai.
+- Sửa: wrapper `bin/slp-claude` gộp mọi `--settings` (Paseo trước, role sau; giữ fastMode/ultracode/disableAllHooks của Paseo), fail-closed nếu role file lỗi. 6 provider Claude dùng wrapper. Conformance mặc định chạy model thật của profile (`--profile-models`; `--cheap` để dùng haiku). 158 test pass; 5 role Claude PASS trên Opus/Sonnet.
+- Agent đang chạy giữ argv cũ → phải tạo/reload agent mới.
+
+### Harness audit 2026-10-16 (build/harness-by-profile.md)
+- Đính chính: `daemon.appendSystemPrompt` tới **cả 5 family** (Claude append, Codex developerInstructions, OpenCode system, Pi extension, Antigravity prepend) — ghi chú cũ "chỉ Claude+Codex" sai.
+- Khoá quyền (2026-10-16): Supervisor/Lead chỉ `create_agent` provider trong `spawn_allow`, chặn `update_agent`/`set_agent_mode`/`send_agent_prompt` có `sessionMode`; Antigravity có push-block env; Pi builder `--exclude-tools subagent*,contact_supervisor,bg_wait,ask_user_question,web_*,memongo_*`; peer Claude deny `AskUserQuestion`/`ExitPlanMode`; Codex roles tắt MCP từ config.toml (`mcp_servers.<n>.enabled=false`) + `features.apps=false`; role prompt có khối Precedence. Hook `mk-kit cbm` hỏng đã gỡ khỏi ~/.claude/settings.json. Test 129 pass.
+- Đã vá: guard protected-branch so khớp nguyên chữ → `git merge origin/master` / `refs/heads/develop` lọt (đã tái hiện); nay chuẩn hoá ref (origin/, refs/heads/, remotes/<r>/, ~N/^/@{}) + test.
+
 ### Quyết định 2026-10-15
 - Giữ override `antigravity` gốc và giữ nguyên `daemon.appendSystemPrompt`: việc riêng (e2e…) chạy ngoài Paseo không bị ảnh hưởng; trong Paseo chấp nhận Antigravity = builder SLP và mọi agent nhận rule Mobio global.
 

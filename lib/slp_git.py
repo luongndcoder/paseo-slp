@@ -32,6 +32,11 @@ def git(worktree: Path, *args: str, check: bool = True) -> str:
     return res.stdout if res.returncode == 0 else ""
 
 
+def head_sha(worktree: Path) -> str:
+    """Full SHA of the worktree HEAD (version pin for verify/review evidence)."""
+    return git(worktree, "rev-parse", "--verify", "HEAD^{commit}").strip()
+
+
 def repo_name(worktree: Path) -> str:
     """Basename of the main repo (worktrees map to the repo they were created from)."""
     common = git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()

@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""slp-claude: launch the real `claude` with the SLP role harness merged into the effective --settings.
+
+  slp-claude --slp-role-settings <role.settings.json> [claude args...]
+
+WHY this wrapper exists: for models with fast mode (claude-opus-*) Paseo hands the Claude Agent SDK its own
+`settings` object ({fastMode, ultracode?, disableAllHooks?}); the SDK emits `--settings <json>` AFTER the provider
+argv, so it shadows the `--settings <role.json>` in the provider command and the agent runs without permissions.deny,
+hooks and skillOverrides (packages/server/src/server/agent/providers/claude/agent.ts `buildSettingsOptions`, and
+query.ts `resolveClaudeSpawnCommand`: provider argv first, SDK args last). This wrapper collects EVERY `--settings`
+occurrence, merges them with the role settings and passes ONE inline `--settings <json>` to claude.
+
+Merge: Paseo's values first, role last. permissions lists: concat + dedupe. hooks: role entries appended per
+event. skillOverrides: role wins. Other keys: role wins (dicts merged recursively). `fastMode`, `ultracode` and
+`disableAllHooks` stay exactly as Paseo set them.
+
+Fails CLOSED: an unreadable/invalid role file (or an unreadable Paseo --settings value) exits 2 without starting claude.
+Everything else (stdin/stdout, --version, `auth status`, ...) passes through via os.execv.
+Stdlib only.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+from typing import Any
+
+ROLE_FLAG = "--slp-role-settings"
+SETTINGS_FLAG = "--settings"
+# Keys the daemon owns: the role file must never override them.
+PASEO_KEYS = ("fastMode", "ultracode", "disableAllHooks")
+ENV_REAL_CLAUDE = "SLP_REAL_CLAUDE"
+
+
+class WrapperError(Exception):
+    """Fail-closed condition: report on stderr, exit non-zero, never start claude."""
+
+
+# ---------------------------------------------------------------- argv
+def take_flag(args: list[str], flag: str) -> tuple[list[str], list[str]]:
+    """Remove every `flag value` / `flag=value` occurrence (before a bare `--`); return (rest, values)."""
+    rest: list[str] = []
+    values: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            rest.extend(args[i:])
+            break
+        if a == flag:
+            if i + 1 >= len(args):
+                raise WrapperError(f"{flag} requires a value")
+            values.append(args[i + 1])
+            i += 2
+            continue
+        if a.startswith(flag + "="):
+            values.append(a[len(flag) + 1 :])
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+    return rest, values
+
+
+def load_settings(value: str, what: str) -> dict[str, Any]:
+    """`value` is inline JSON (starts with `{`) or a file path."""
+    text = value.strip()
+    if not text.startswith("{"):
+        try:
+            text = Path(value).expanduser().read_text()
+        except OSError as exc:
+            raise WrapperError(f"cannot read {what} {value!r}: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise WrapperError(f"{what} is not valid JSON ({value[:80]!r}): {exc}") from exc
+    if not isinstance(data, dict):
+        raise WrapperError(f"{what} must be a JSON object")
+    return data
+
+
+# ---------------------------------------------------------------- merge
+def dedupe(items: list[Any]) -> list[Any]:
+    out: list[Any] = []
+    for item in items:
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def merge_permissions(base: Any, over: Any) -> Any:
+    if not isinstance(base, dict) or not isinstance(over, dict):
+        return over
+    out = dict(base)
+    for key, val in over.items():
+        if isinstance(val, list) and isinstance(base.get(key), list):
+            out[key] = dedupe([*base[key], *val])
+        else:
+            out[key] = val
+    return out
+
+
+def merge_hooks(base: Any, over: Any) -> Any:
+    if not isinstance(base, dict) or not isinstance(over, dict):
+        return over
+    out = dict(base)
+    for event, entries in over.items():
+        if isinstance(entries, list) and isinstance(base.get(event), list):
+            out[event] = [*base[event], *entries]
+        else:
+            out[event] = entries
+    return out
+
+
+def merge_plain(base: Any, over: Any) -> Any:
+    """Recursive dict merge, overlay wins on scalars and lists."""
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for key, val in over.items():
+            out[key] = merge_plain(base[key], val) if key in base else val
+        return out
+    return over
+
+
+def merge_layer(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, val in over.items():
+        if key not in base:
+            out[key] = val
+        elif key == "permissions":
+            out[key] = merge_permissions(base[key], val)
+        elif key == "hooks":
+            out[key] = merge_hooks(base[key], val)
+        else:  # skillOverrides and every other key: overlay wins
+            out[key] = merge_plain(base[key], val)
+    return out
+
+
+def merge_settings(paseo_layers: list[dict[str, Any]], role: dict[str, Any]) -> dict[str, Any]:
+    paseo: dict[str, Any] = {}
+    for layer in paseo_layers:
+        paseo = merge_layer(paseo, layer)
+    merged = merge_layer(paseo, role)
+    for key in PASEO_KEYS:
+        if key in paseo:
+            merged[key] = paseo[key]
+    return merged
+
+
+# ---------------------------------------------------------------- real claude
+def find_real_claude(env: dict[str, str] | None = None, self_path: str | None = None) -> str:
+    env = os.environ if env is None else env
+    override = env.get(ENV_REAL_CLAUDE)
+    if override:
+        if not (os.path.isfile(override) and os.access(override, os.X_OK)):
+            raise WrapperError(f"{ENV_REAL_CLAUDE}={override!r} is not an executable file")
+        return override
+    me = os.path.realpath(self_path or __file__)
+    for directory in env.get("PATH", os.defpath).split(os.pathsep):
+        cand = os.path.join(directory or ".", "claude")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK) and os.path.realpath(cand) != me:
+            return cand
+    raise WrapperError("real `claude` binary not found on PATH (set SLP_REAL_CLAUDE)")
+
+
+# ---------------------------------------------------------------- main
+def build_argv(args: list[str]) -> tuple[list[str], dict[str, Any]]:
+    """Return (claude args without the wrapper flags, merged settings)."""
+    rest, role_values = take_flag(args, ROLE_FLAG)
+    if not role_values:
+        raise WrapperError(f"{ROLE_FLAG} <path> is required")
+    role_path = role_values[-1]
+    if role_path.strip().startswith("{"):
+        raise WrapperError(f"{ROLE_FLAG} must be a file path, not inline JSON")
+    role = load_settings(role_path, "role settings file")
+    rest, paseo_values = take_flag(rest, SETTINGS_FLAG)
+    layers = [load_settings(v, "--settings value") for v in paseo_values]
+    merged = merge_settings(layers, role)
+    return [SETTINGS_FLAG, json.dumps(merged, separators=(",", ":")), *rest], merged
+
+
+def main(argv: list[str]) -> int:
+    try:
+        claude_args, _ = build_argv(argv[1:])
+        real = find_real_claude()
+    except WrapperError as exc:
+        print(f"slp-claude: {exc} (refusing to start claude without the SLP harness)", file=sys.stderr)
+        return 2
+    os.execv(real, [real, *claude_args])
+    return 127  # unreachable
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

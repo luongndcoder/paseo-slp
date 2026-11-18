@@ -1,6 +1,8 @@
 {
   "slice_id": "s1-export-service",
   "round": 1,
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "base_ref": "develop",
   "verdict": "fix",
   "findings": [
     {

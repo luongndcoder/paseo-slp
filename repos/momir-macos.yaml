@@ -1,0 +1,11 @@
+repo: momir-macos
+
+commands:
+  test:
+    cmd: "swift test"
+    timeout: 1800
+  typecheck:
+    cmd: "swift build"
+    timeout: 1800
+  lint:
+    skip: "repo chưa cấu hình swiftlint"

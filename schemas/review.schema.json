@@ -4,12 +4,46 @@
   "title": "SLP review (Checker -> Lead); also final-review.json and *.checked.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["slice_id", "round", "verdict", "findings"],
+  "required": [
+    "slice_id",
+    "round",
+    "verdict",
+    "head_sha",
+    "base_ref",
+    "findings"
+  ],
   "properties": {
-    "slice_id": {"type": "string", "minLength": 1},
-    "round": {"type": "integer", "minimum": 1},
-    "verdict": {"enum": ["pass", "fix", "block"]},
-    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "slice_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "fix",
+        "block"
+      ]
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+      "description": "Full SHA of the worktree HEAD the reviewer read (`git rev-parse HEAD`). slp-evidence rejects the whole review as stale when it differs from the current HEAD."
+    },
+    "base_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Diff base the reviewer used: the brief's base_ref (slice) or the workstream base_branch (final review)."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
     "notes": {
       "type": "string",
       "description": "Reasons not tied to a code line, e.g. missing brief or diff (verdict block)."
@@ -20,23 +54,68 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["finding", "reason"],
-        "properties": {"finding": {}, "reason": {"type": "string"}}
+        "required": [
+          "finding",
+          "reason"
+        ],
+        "properties": {
+          "finding": {},
+          "reason": {
+            "type": "string"
+          }
+        }
       }
+    },
+    "status": {
+      "enum": [
+        "checked",
+        "stale"
+      ],
+      "description": "Written by slp-evidence only: `stale` = head_sha differs from the worktree HEAD, every finding was rejected."
     }
   },
   "$defs": {
     "finding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lens", "severity", "file", "line", "evidence", "fix_hint"],
+      "required": [
+        "lens",
+        "severity",
+        "file",
+        "line",
+        "evidence",
+        "fix_hint"
+      ],
       "properties": {
-        "lens": {"enum": ["business", "security", "perf", "scale"]},
-        "severity": {"enum": ["blocker", "major", "minor"]},
-        "file": {"type": "string", "minLength": 1},
-        "line": {"type": "integer", "minimum": 1},
-        "evidence": {"type": "string"},
-        "fix_hint": {"type": "string"}
+        "lens": {
+          "enum": [
+            "business",
+            "security",
+            "perf",
+            "scale"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "blocker",
+            "major",
+            "minor"
+          ]
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "fix_hint": {
+          "type": "string"
+        }
       }
     }
   }

@@ -6,7 +6,7 @@ description: "SLP final reviewer (Claude): reads code, writes only .slp/final-re
 write: slp-only      # only its own review JSON under .slp/ (hook-enforced); bash stays readonly
 bash: readonly
 bash_allow:
-  - '^git (diff|log|show|status)(\s|$)'
+  - '^git (diff|log|show|status|rev-parse)(\s|$)'
   - '^(cat|ls|rg|grep)(\s|$)'
 bash_deny:
   - '\s--output(=|\s|$)'
@@ -15,5 +15,6 @@ bash_deny:
 protected_branches: []
 paseo_tools: {enabled: false, disabled: []}
 skills_auto: []
-deny_tools: [Agent, Task, NotebookEdit]
-probe: {model: claude-haiku-5-5, mode: bypassPermissions}
+# WHY: peers are workers; AskUserQuestion / ExitPlanMode would open a user prompt nobody answers (deny holds under bypassPermissions)
+deny_tools: [Agent, Task, NotebookEdit, AskUserQuestion, ExitPlanMode]
+probe: {model: claude-haiku-5-5, mode: bypassPermissions, tools_probe: true, profile: slp-final-reviewer}

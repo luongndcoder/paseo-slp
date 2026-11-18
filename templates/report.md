@@ -16,9 +16,13 @@ metrics:
   rounds_total: 3
   sonnet_fallbacks: 0
   verify_failures: {test: 1, scope: 0, hard_gate: 1, sandbox_escape: 0, contract: 0}
-  evidence_rejected: 1
-  evidence_total: 4
+  scope_challenges: {raised: 1, accepted: 1, rejected: 0}
+  reviews:
+    - {reviewer_profile: slp-checker-sonnet, slice: s1-export-service, round: 1, findings_total: 3, findings_accepted: 2, changed_outcome: true}
+    - {reviewer_profile: slp-checker-sonnet, slice: s2-export-route, round: 1, findings_total: 0, findings_accepted: 0, changed_outcome: false}
+    - {reviewer_profile: slp-final-reviewer, slice: workstream, round: 1, findings_total: 1, findings_accepted: 0, changed_outcome: false}
 ---
 # Summary (at most 30 lines in total)
 
 Both slices merged into the workstream branch (local, not pushed). Final review: pass.
+Scope challenge (s1, accepted): builder showed the repo already pages; brief rewritten, round 2.
